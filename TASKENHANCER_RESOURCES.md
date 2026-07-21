@@ -1,10 +1,9 @@
 # TaskEnhancer Resources — Full Documentation
 
 This appendix provides the complete documentation of the TaskEnhancer
-component's internal resources and construction methodology, as requested
-by reviewers. All information documented here is directly reproducible
-from the code in `model_simple/task_enhancer.py` and
-`model_simple/mine_domain_keywords.py`.
+component's internal resources and construction methodology. All information documented here is directly reproducible
+from the code in `task_enhancer.py` and
+`mine_domain_keywords.py`.
 
 ---
 
@@ -550,14 +549,3 @@ in any standard process modelling corpus.
 | Cross-category threshold (7 %) | Self-adaptive | Recomputed automatically from new keyword table size |
 | Partial-match ratio (0.5) | No | Fixed at majority-vote principle |
 
-### 7.3 Known limitation
-
-The single-word category disambiguation mechanism (§6.2) was designed for
-ProgrammableWeb's category tag vocabulary, where common English words such
-as `chef` appear as category labels (referring to configuration management
-tools) and collide with their everyday meanings. If a different API
-repository uses a more controlled category taxonomy, the
-`require_evidence_for_single_word = False` setting may produce higher
-recall at acceptable precision. We recommend running the ablation
-described in the `__init__` docstring on any new repository before
-committing to a default.

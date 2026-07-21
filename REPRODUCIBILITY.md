@@ -16,9 +16,7 @@ All LLM calls in this pipeline go through the DeepSeek chat completion API.
 | Evaluation harness fallback client | `evaluation/run_evaluation.py` (`LLMClient`) | `deepseek-chat` | 0.3 | 2500 | 180s |
 
 Temperature is unified to **0.3** across all three call sites as of this
-release. (An earlier internal build used 0.15 in the BPMN structure
-generator; if you are comparing against results produced before this
-release, note that discrepancy.)
+release.
 
 No decoding parameters (top_p, frequency/presence penalty) are set
 explicitly, so they use the DeepSeek API defaults at call time. We do not
@@ -32,7 +30,7 @@ window stated in Section 5 of the paper.
 Retry behavior differs by call site:
 
 - **BPMN structure generation** (`enhanced_bpmn_generator.py`) and the
-  **evaluation harness fallback client** (`evaluation/run_evaluation.py`,
+  **evaluation harness fallback client** (`run_evaluation.py`,
   `LLMClient`) retry up to `max_retries = 3` times on: HTTP status != 200,
   request timeout, connection error, or (structure generator only) JSON
   parse/schema failure of the model output. Backoff is a fixed sleep
@@ -57,7 +55,7 @@ overview / README).
   attempt > 1).
 - `LLMConfirmer.stats` includes `llm_call_failures` (single-attempt calls
   that raised and used the safe fallback).
-- `evaluation/run_evaluation.py`'s `LLMClient.get_retry_stats()` returns
+- `run_evaluation.py`'s `LLMClient.get_retry_stats()` returns
   `total_calls`, `total_attempts`, `calls_needing_retry`, and
   `calls_exhausted`.
 
@@ -84,18 +82,18 @@ identical task/API pairs and will not reflect independent LLM samples.
 
 - **BPMN structure generation prompt**: built by
   `EnhancedBPMNGenerator._build_enhanced_prompt()` in
-  `model_simple/enhanced_bpmn_generator.py`. This is the exact system
+  `enhanced_bpmn_generator.py`. This is the exact system
   prompt used at inference time — nothing is redacted or paraphrased for
   release.
 - **API re-ranking / confirmation prompts**: built in
-  `model_simple/llm_confirmer.py` (see the prompt-construction methods
+  `llm_confirmer.py` (see the prompt-construction methods
   feeding `DeepSeekClient.chat`).
 - **Output schema and validation rules**: `_validate_bpmn()` in
   `enhanced_bpmn_generator.py` defines the structural checks applied to
   every generated workflow (required fields, task/gateway/edge
   consistency) before a result is accepted; a failed validation triggers
   a retry (see §2).
-- **Representative outputs**: see `evaluation/sample_outputs/` (add your
+- **Representative outputs**: see `sample_outputs/` (add your
   scenario transcripts there — raw JSON in, raw JSON out, one file per
   scenario/run) so a reader can inspect real generations rather than only
   the aggregated metrics.
@@ -120,8 +118,6 @@ identical task/API pairs and will not reflect independent LLM samples.
   p < 0.01, Holm-corrected). Against BPMN-MLP, the difference is
   significant only in the Recourse scenario (p = 0.043); the remaining
   three scenarios show no significant difference.
-- Full per-scenario tables (t, df, p, g, CI) are reported in the paper's
-  appendix.
 
 If you re-run the evaluation yourself, use a **fresh LLM-confirmer
 instance per run** (or disable caching — see §3) so that the 10 runs per
@@ -133,13 +129,13 @@ This repository includes the full generation pipeline, prompts, and
 validation logic (§4), the statistical-analysis and repeated-run scripts
 described in §7, and (as of this release):
 
-- **`evaluation/common/scenarios.py`** — the real `BPMN_TEST_SCENARIOS`
+- **`scenarios.py`** — the real `BPMN_TEST_SCENARIOS`
   (4 scenarios: Dispatch of Goods, Recourse, Credit Scoring,
   Self-Service Restaurant), each with its verbatim process description
   and a reference to its ground-truth `.bpmn` solution file under
   `ground_truth/`, plus the `UnifiedOutput` result container and
   `save_results` helper used by `run_evaluation.py`.
-- **`evaluation/common/metrics.py`** — real structural-quality and
+- **`metrics.py`** — real structural-quality and
   API-binding metrics: a Hungarian-matching-based structural F1 (node
   F1 + edge F1 + gateway-type agreement) against the ground-truth BPMN,
   and a top-1/top-k API hit rate against `ground_truth/api_gold.json`
@@ -149,7 +145,7 @@ described in §7, and (as of this release):
   solution `.bpmn` files, and human-annotated gold API bindings, plus
   `tools/extract_ground_truth.py`, the (auditable) script used to parse
   the `.bpmn` files into the flat structure the metrics operate on.
-- **`evaluation/merge_baseline_results.py`** — merges this repo's raw
+- **`merge_baseline_results.py`** — merges this repo's raw
   per-run results with baseline methods' raw per-run results into the
   single `scenario -> method -> metric -> [values]` JSON shape
   `statistical_analysis.py` expects, with explicit (never silent)
@@ -158,18 +154,12 @@ described in §7, and (as of this release):
   significance tests.
 
 It still does **not** include:
-- your private API catalog / embeddings (`model_simple/data/`,
-  `model_simple/embeddings/`) — see main README "Setup",
+- your private API catalog / embeddings  — see main README "Setup",
 - raw per-run results for baseline methods (AutoFlow-MTFM, MAO,
   BPMN-MLP) themselves — those must be produced by their own
   repos/scripts (this repo only drives its own model); use
   `merge_baseline_results.py` to combine them with this repo's output
   once you have them,
-- real generated transcripts under `evaluation/sample_outputs/` — the
-  sandbox this release was prepared in has no network access to the
-  DeepSeek API, so none could be produced without fabricating them; see
-  that folder's README for the exact command to generate and score your
-  own once you have API access.
 
 ## 7. Running the statistical evaluation end-to-end
 
@@ -212,22 +202,3 @@ degrees of freedom, and p-value (they match to floating-point precision);
 Hedges' g and the Holm-Bonferroni step-down correction are implemented
 directly in the script (no extra dependency beyond `scipy`, already added
 to `requirements.txt`).
-
-## 8. Reviewer checklist
-
-| Reviewer ask | Where it's addressed |
-|---|---|
-| Statistical testing unit | §5 — the independent end-to-end run, n=10 per scenario per method |
-| p-values | §5, `statistical_analysis.py` output (`p_raw`, `p_holm`) |
-| Effect sizes | §5, `statistical_analysis.py` output (`hedges_g`) |
-| Confidence intervals | §5, `statistical_analysis.py` output (`ci95_low`/`ci95_high`) |
-| Repeated LLM runs, mean/std | §7, `run_repeated_evaluation.py` + `statistical_analysis.py` |
-| Full prompts | §4 — shipped as-is in `enhanced_bpmn_generator.py` / `llm_confirmer.py` |
-| JSON schema / validation rules | §4 — `_validate_bpmn()` in `enhanced_bpmn_generator.py` |
-| Model version | §1 — `deepseek-chat` |
-| API call settings (temperature, retry, caching) | §1–§3 |
-| Retry statistics | §2 — now tracked in code, not just printed |
-| Representative generated outputs | `evaluation/sample_outputs/` — add your scenario transcripts here (see that folder's README); none shipped, since the release sandbox has no DeepSeek API access and we did not want to fabricate them |
-| Real scenario definitions | §6, `evaluation/common/scenarios.py` — 4 real process descriptions + ground-truth `.bpmn` references |
-| Real structural/API metrics | §6, `evaluation/common/metrics.py` — Hungarian-matching structural F1 + gateway-type accuracy, API top-1/top-k hit rate vs. human-annotated gold bindings |
-| Merging baseline raw data | §6–7, `evaluation/merge_baseline_results.py` — explicit renaming, no silent name-guessing, validates n and method coverage per scenario |
