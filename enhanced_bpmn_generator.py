@@ -1,28 +1,47 @@
-import os
 import json
+import os
 import re
-import requests
-from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Iterator, List, Optional
+
+import requests
 
 
-ENHANCED_BPMN_PROMPT = '''# BPMN JSON Representation Guide (Enhanced v2.3)
+TASK_TYPES = frozenset({
+    "userTask", "serviceTask", "sendTask", "receiveTask",
+    "manualTask", "businessRuleTask", "scriptTask",
+})
 
-The BPMN JSON uses a hierarchical structure where gateways contain their branches directly.
+GATEWAY_TYPES = frozenset({"exclusiveGateway", "parallelGateway", "inclusiveGateway"})
 
-## Core Elements
+
+CONDITIONAL_GATEWAY_TYPES = frozenset({"exclusiveGateway", "inclusiveGateway"})
+
+
+
+ENHANCED_BPMN_PROMPT = '''# BPMN JSON Representation Guide
+
+The BPMN JSON is hierarchical: every gateway contains its branches directly,
+and a branch may contain further gateways (nesting).
+
+## Elements
 
 ### 1. Tasks
-- **userTask**: Human decisions/reviews
-- **serviceTask**: Automated system operations
-- **sendTask**: Sending communications
-- **receiveTask**: Waiting for input
-- **manualTask**: Physical work without IT
-- **businessRuleTask**: Rule engine decisions
-- **scriptTask**: Script execution
+Every task has "type", "id", "label" (a short task name) and "description"
+(one sentence describing the action).
+
+Task types:
+- userTask: human decisions or reviews
+- serviceTask: automated system operations
+- sendTask: sending communications
+- receiveTask: waiting for input
+- manualTask: physical work without IT support
+- businessRuleTask: rule-engine decisions
+- scriptTask: script execution
 
 ```json
-{"type": "userTask", "id": "task1", "label": "Review application"}
+{"type": "userTask", "id": "task_1", "label": "Review application", "description": "Review the submitted application."}
 ```
 
 ### 2. Events
@@ -32,38 +51,46 @@ The BPMN JSON uses a hierarchical structure where gateways contain their branche
 ```
 
 ### 3. Gateways
+Detect gateways from the lexical triggers below. A gateway is created only
+when the description contains a trigger or an unambiguous equivalent.
 
-#### Exclusive Gateway (XOR) — "if", "depending on", "either/or"
+#### Exclusive gateway (XOR)
+Triggered by conditional expressions such as "if", "depending on",
+"in case of", "when".
 ```json
 {
-    "type": "exclusiveGateway", "id": "exclusive1",
+    "type": "exclusiveGateway", "id": "exclusive_1",
     "label": "Decision?", "has_join": true,
     "branches": [
-        {"condition": "Condition A", "path": [{"type": "userTask", "id": "t1", "label": "Task A"}]},
-        {"condition": "Condition B", "path": [{"type": "userTask", "id": "t2", "label": "Task B"}]}
+        {"condition": "Condition A", "path": [{"type": "userTask", "id": "task_2", "label": "Task A", "description": "Do A."}]},
+        {"condition": "Condition B", "path": [{"type": "userTask", "id": "task_3", "label": "Task B", "description": "Do B."}]}
     ]
 }
 ```
 
-#### Parallel Gateway (AND) — "meanwhile", "simultaneously", "in parallel"
+#### Parallel gateway (AND)
+Triggered by concurrency indicators such as "meanwhile", "at the same time",
+"in parallel". Branches are plain task sequences without conditions.
 ```json
 {
-    "type": "parallelGateway", "id": "parallel1",
+    "type": "parallelGateway", "id": "parallel_1",
+    "label": "Concurrent activities", "has_join": true,
     "branches": [
-        [{"type": "manualTask", "id": "t3", "label": "Branch task 1"}],
-        [{"type": "userTask", "id": "t4", "label": "Branch task 2"}]
+        [{"type": "manualTask", "id": "task_4", "label": "Branch task 1", "description": "Do the first activity."}],
+        [{"type": "userTask", "id": "task_5", "label": "Branch task 2", "description": "Do the second activity."}]
     ]
 }
 ```
 
-#### Inclusive Gateway (OR) — "if necessary", "optionally", "may"
+#### Inclusive gateway (OR)
+Triggered by optional constructs such as "if necessary", "may", "optionally".
 ```json
 {
-    "type": "inclusiveGateway", "id": "inclusive1",
+    "type": "inclusiveGateway", "id": "inclusive_1",
     "label": "Optional?", "has_join": true,
     "branches": [
-        {"condition": "If needed", "path": [{"type": "userTask", "id": "t5", "label": "Optional task"}]},
-        {"condition": "Default", "path": [], "is_default": true}
+        {"condition": "If necessary", "path": [{"type": "userTask", "id": "task_6", "label": "Optional task", "description": "Do the optional step."}]},
+        {"condition": "Otherwise", "path": []}
     ]
 }
 ```
@@ -73,229 +100,173 @@ The BPMN JSON uses a hierarchical structure where gateways contain their branche
 {
     "process": [
         {"type": "startEvent", "id": "start"},
-        {"type": "userTask", "id": "task1", "label": "First task"},
-        {"type": "exclusiveGateway", "id": "gw1", "label": "Decision?", "has_join": true, "branches": [...]},
+        {"type": "userTask", "id": "task_1", "label": "First task", "description": "Do the first step."},
+        {"type": "exclusiveGateway", "id": "exclusive_1", "label": "Decision?", "has_join": true, "branches": []},
         {"type": "endEvent", "id": "end"}
     ]
 }
 ```
 
-## ═══════════════════════════════════════
-## STRUCTURAL & MODELING RULES
-## ═══════════════════════════════════════
+## Modeling Rules
 
-### RULE A — Independent Item/Category Selection
-When the text describes choosing among or handling several independent
-item categories (e.g. product types, service tiers, request types) that
-are each processed through their own steps, use a parallelGateway with
-ONE BRANCH PER category that the text actually mentions. The number of
-branches and the number of tasks inside each branch must come only from
-what the text states or clearly implies for that category — never pad
-to reach a fixed branch count or task count.
-
-### RULE B — Multi-Role Parallel
-Use parallelGateway with one branch per role/department.
-
-### RULE C — Nested Conditions
-Nest gateways inside branch paths.
-
-### RULE D — Task Granularity
-One task = one atomic action. Never collapse steps.
-
-### RULE E — Structural Validity (CRITICAL)
-- EVERY exclusiveGateway MUST have "has_join": true
-- EVERY inclusiveGateway MUST have "has_join": true
-- EVERY gateway MUST have at least 2 branches
-- ALL element IDs must be globally unique
+1. **Gateway detection.** Detect exclusive, parallel and inclusive gateways
+   from the lexical triggers listed above. Do not invent gateways, tasks,
+   roles or conditions that the text does not state or clearly imply, and do
+   not omit steps that are explicitly stated.
+2. **Branch conditions.** Extract the exact branching condition of every
+   exclusive and inclusive branch verbatim from the description.
+3. **Identifiers.** Use the naming convention task_1, task_2, ... for tasks
+   (in order of appearance) and exclusive_1, parallel_1, inclusive_1, ... for
+   gateways (numbered per gateway type). Events use "start" and "end". All
+   element IDs must be globally unique.
+4. **Nesting.** Encode nested gateways recursively inside the branch paths of
+   the enclosing gateway.
+5. **Granularity.** One task is one atomic action. Never collapse several
+   steps into one task.
+6. **Structural validity.**
+   - Exactly one startEvent and at least one endEvent.
+   - Every gateway has "has_join": true and at least two branches.
+   - Every branch of an exclusive or inclusive gateway has a non-empty
+     "condition", so that the number of conditions equals the number of
+     branches.
 '''
 
 
+def _build_examples() -> str:
 
-ENHANCED_EXAMPLES = '''# Complete BPMN Examples (v2.3)
 
-## Example 1: Illustrative example — exclusive branch containing a sub-sequence, plus a parallel branch with a nested optional (inclusive) step
-**This shows the JSON schema/format only. Do not copy this content for other inputs — always derive tasks and structure from the actual text being processed.**
+    start = {"type": "startEvent", "id": "start"}
+    end = {"type": "endEvent", "id": "end"}
 
-```json
-{
-    "process": [
-        {"type": "startEvent", "id": "start"},
-        {"type": "userTask", "id": "task_clarify", "label": "Clarify ticket category"},
-        {
-            "type": "exclusiveGateway", "id": "eg_category",
-            "label": "Hardware or software issue?", "has_join": true,
-            "branches": [
-                {
-                    "condition": "Hardware issue",
-                    "path": [
-                        {"type": "userTask", "id": "task_assign_tech", "label": "Assign field technician"},
-                        {"type": "serviceTask", "id": "task_order_part", "label": "Order replacement part"},
-                        {"type": "manualTask", "id": "task_install_part", "label": "Install replacement part"}
-                    ]
-                },
-                {
-                    "condition": "Software issue",
-                    "path": [{"type": "scriptTask", "id": "task_patch", "label": "Deploy remote software patch"}]
-                }
-            ]
-        },
-        {
-            "type": "parallelGateway", "id": "pg_wrapup",
-            "branches": [
-                [
-                    {"type": "serviceTask", "id": "task_log", "label": "Update ticket status log"},
-                    {
-                        "type": "inclusiveGateway", "id": "ig_callback",
-                        "label": "Callback requested?", "has_join": true,
-                        "branches": [
-                            {"condition": "Callback requested", "path": [{"type": "userTask", "id": "task_callback", "label": "Schedule callback call"}]},
-                            {"condition": "No callback", "path": [], "is_default": true}
-                        ]
-                    }
-                ],
-                [{"type": "sendTask", "id": "task_notify", "label": "Notify requester ticket is resolved"}]
-            ]
-        },
-        {"type": "userTask", "id": "task_close", "label": "Close ticket"},
-        {"type": "endEvent", "id": "end"}
+    def scope():
+        counts = {"task": 0, "exclusive": 0, "parallel": 0, "inclusive": 0}
+
+        def task(kind: str, label: str, description: str) -> Dict[str, Any]:
+            counts["task"] += 1
+            return {"type": kind, "id": "task_%d" % counts["task"],
+                    "label": label, "description": description}
+
+        def gateway(kind: str, label: str, branches: List[Any]) -> Dict[str, Any]:
+            counts[kind] += 1
+            return {"type": kind + "Gateway", "id": "%s_%d" % (kind, counts[kind]),
+                    "label": label, "has_join": True, "branches": branches}
+
+        def branch(condition: str, *elements: Dict[str, Any]) -> Dict[str, Any]:
+            return {"condition": condition, "path": list(elements)}
+
+        return task, gateway, branch
+
+
+    task, gateway, branch = scope()
+    example_1 = {"process": [
+        start,
+        task("userTask", "Clarify ticket category",
+             "Determine whether the ticket concerns a hardware or a software issue."),
+        gateway("exclusive", "Hardware or software issue?", [
+            branch("Hardware issue",
+                   task("userTask", "Assign field technician", "Assign a field technician to the ticket."),
+                   task("serviceTask", "Order replacement part", "Order the replacement part from the supplier."),
+                   task("manualTask", "Install replacement part", "Install the replacement part on site.")),
+            branch("Software issue",
+                   task("scriptTask", "Deploy remote software patch", "Deploy the software patch remotely.")),
+        ]),
+        gateway("parallel", "Wrap-up activities", [
+            [task("serviceTask", "Update ticket status log", "Record the new status in the ticket log."),
+             gateway("inclusive", "Callback requested?", [
+                 branch("Callback requested",
+                        task("userTask", "Schedule callback call", "Schedule a callback call with the requester.")),
+                 branch("No callback"),
+             ])],
+            [task("sendTask", "Notify requester", "Notify the requester that the ticket is resolved.")],
+        ]),
+        task("userTask", "Close ticket", "Close the ticket."),
+        end,
+    ]}
+
+
+    task, gateway, branch = scope()
+    example_2 = {"process": [
+        start,
+        task("receiveTask", "Receive bug report", "Receive the bug report from the reporter."),
+        task("userTask", "Register report", "Register the report in the tracker."),
+        task("businessRuleTask", "Assess severity", "Assess the severity level of the report."),
+        gateway("exclusive", "Severity critical?", [
+            branch("Critical severity",
+                   task("userTask", "Escalate report", "Escalate the report to the on-call engineer."),
+                   task("serviceTask", "Deploy hotfix", "Deploy the hotfix."),
+                   task("sendTask", "Notify reporter", "Notify the reporter that the bug is fixed.")),
+            branch("Low severity",
+                   task("userTask", "Add report to backlog", "Add the report to the backlog.")),
+        ]),
+        task("userTask", "Close report", "Close and archive the report."),
+        end,
+    ]}
+
+
+    task, gateway, branch = scope()
+    example_3 = {"process": [
+        start,
+        task("receiveTask", "Receive submission", "Receive the paper submission."),
+        task("businessRuleTask", "Check formatting", "Run the automated formatting check."),
+        task("userTask", "Screen submission", "The program chair performs the initial screening."),
+        gateway("exclusive", "Initial score above threshold?", [
+            branch("Above threshold",
+                   gateway("parallel", "Review activities", [
+                       [task("userTask", "First review", "The first reviewer evaluates the paper."),
+                        task("userTask", "Second review", "The second reviewer evaluates the paper.")],
+                       [task("serviceTask", "Run plagiarism check", "Run the plagiarism check on the paper."),
+                        task("userTask", "Confirm track match", "Confirm that the paper matches the track.")],
+                   ]),
+                   task("userTask", "Hold discussion", "The committee holds a discussion.")),
+            branch("Below threshold"),
+        ]),
+        gateway("exclusive", "Final decision?", [
+            branch("Accepted", task("sendTask", "Send acceptance", "Send the acceptance notification.")),
+            branch("Rejected", task("sendTask", "Send rejection", "Send the rejection notification.")),
+        ]),
+        end,
+    ]}
+
+
+    task, gateway, branch = scope()
+    example_4 = {"process": [
+        start,
+        task("userTask", "Send welcome email", "HR sends the welcome email."),
+        task("userTask", "Complete paperwork", "The new hire completes the onboarding paperwork."),
+        gateway("parallel", "Department set-up", [
+            [task("serviceTask", "Create IT account", "Create the IT account."),
+             task("manualTask", "Prepare hardware", "Prepare the laptop and hardware.")],
+            [task("manualTask", "Assign desk", "Assign desk space."),
+             task("manualTask", "Issue badge", "Issue the building access badge.")],
+            [task("userTask", "Set up payroll", "Set up payroll direct deposit."),
+             task("userTask", "Enroll in benefits", "Enroll the employee in the benefits plan.")],
+        ]),
+        task("userTask", "Attend orientation", "Attend the orientation session."),
+        end,
+    ]}
+
+    headers = [
+        "Exclusive branch containing a sub-sequence, plus a parallel gateway with a nested inclusive gateway",
+        "Single exclusive gateway with a short branch on each side",
+        "Exclusive gateway containing a nested parallel gateway",
+        "Parallel gateway with one branch per department",
     ]
-}
-```
+    note = ("This illustrates the JSON schema only. Always derive tasks and "
+            "structure from the description being processed.")
 
-## Example 2: Illustrative example — single exclusive gateway with a short branch on each side
-**This shows the JSON schema/format only. Do not copy this content for other inputs — always derive tasks and structure from the actual text being processed.**
-
-```json
-{
-    "process": [
-        {"type": "startEvent", "id": "start"},
-        {"type": "receiveTask", "id": "task_receive", "label": "Receive bug report"},
-        {"type": "userTask", "id": "task_register", "label": "Register report in tracker"},
-        {"type": "businessRuleTask", "id": "task_triage", "label": "Assess severity level"},
-        {
-            "type": "exclusiveGateway", "id": "eg_severity",
-            "label": "Severity critical?", "has_join": true,
-            "branches": [
-                {
-                    "condition": "Critical severity",
-                    "path": [
-                        {"type": "userTask", "id": "task_escalate", "label": "Escalate to on-call engineer"},
-                        {"type": "serviceTask", "id": "task_hotfix", "label": "Deploy hotfix"},
-                        {"type": "sendTask", "id": "task_notify_fixed", "label": "Notify reporter of fix"}
-                    ]
-                },
-                {
-                    "condition": "Low severity",
-                    "path": [
-                        {"type": "userTask", "id": "task_backlog", "label": "Add report to backlog"}
-                    ]
-                }
-            ]
-        },
-        {"type": "userTask", "id": "task_close", "label": "Close and archive report"},
-        {"type": "endEvent", "id": "end"}
-    ]
-}
-```
-
-## Example 3: Illustrative example — exclusive gateway containing a nested parallel gateway
-**This shows the JSON schema/format only. Do not copy this content for other inputs — always derive tasks and structure from the actual text being processed.**
-
-```json
-{
-    "process": [
-        {"type": "startEvent", "id": "start"},
-        {"type": "receiveTask", "id": "task_receive", "label": "Receive paper submission"},
-        {"type": "businessRuleTask", "id": "task_screen", "label": "Run automated formatting check"},
-        {"type": "userTask", "id": "task_chair", "label": "Program chair performs initial screening"},
-        {
-            "type": "exclusiveGateway", "id": "eg_score",
-            "label": "Initial score above threshold?", "has_join": true,
-            "branches": [
-                {
-                    "condition": "Above threshold",
-                    "path": [
-                        {
-                            "type": "parallelGateway", "id": "pg_reviews",
-                            "branches": [
-                                [
-                                    {"type": "userTask", "id": "task_review1", "label": "First reviewer evaluates paper"},
-                                    {"type": "userTask", "id": "task_review2", "label": "Second reviewer evaluates paper"},
-                                    {"type": "userTask", "id": "task_review3", "label": "Third reviewer evaluates paper"}
-                                ],
-                                [
-                                    {"type": "serviceTask", "id": "task_plagiarism", "label": "Run plagiarism check"},
-                                    {"type": "serviceTask", "id": "task_similarity", "label": "Compute topic similarity score"},
-                                    {"type": "userTask", "id": "task_area_match", "label": "Confirm track/area match"}
-                                ]
-                            ]
-                        },
-                        {"type": "userTask", "id": "task_discuss", "label": "Committee holds discussion"}
-                    ]
-                },
-                {"condition": "Below threshold", "path": []}
-            ]
-        },
-        {
-            "type": "exclusiveGateway", "id": "eg_decision",
-            "label": "Final decision?", "has_join": true,
-            "branches": [
-                {"condition": "Accepted", "path": [{"type": "sendTask", "id": "task_accept", "label": "Send acceptance notification"}]},
-                {"condition": "Rejected", "path": [{"type": "sendTask", "id": "task_reject", "label": "Send rejection notification"}]}
-            ]
-        },
-        {"type": "endEvent", "id": "end"}
-    ]
-}
-```
-
-## Example 4: Illustrative example — parallel gateway with several branches, one per role/department
-**This shows the JSON schema/format only. Do not copy this content for other inputs — always derive tasks and structure from the actual text being processed.**
-
-```json
-{
-    "process": [
-        {"type": "startEvent", "id": "start"},
-        {"type": "userTask", "id": "task_welcome", "label": "HR sends welcome email"},
-        {"type": "userTask", "id": "task_paperwork", "label": "New hire completes onboarding paperwork"},
-        {
-            "type": "parallelGateway", "id": "pg_departments",
-            "branches": [
-                [
-                    {"type": "serviceTask", "id": "t_it_account", "label": "Create IT account"},
-                    {"type": "manualTask", "id": "t_it_hardware", "label": "Prepare laptop and hardware"}
-                ],
-                [
-                    {"type": "manualTask", "id": "t_fac_desk", "label": "Assign desk space"},
-                    {"type": "manualTask", "id": "t_fac_badge", "label": "Issue building access badge"}
-                ],
-                [
-                    {"type": "userTask", "id": "t_pay_setup", "label": "Set up payroll direct deposit"},
-                    {"type": "userTask", "id": "t_pay_benefits", "label": "Enroll in benefits plan"}
-                ]
-            ]
-        },
-        {"type": "userTask", "id": "task_orientation", "label": "Attend orientation session"},
-        {"type": "userTask", "id": "task_checkin", "label": "Manager holds first-week check-in"},
-        {"type": "endEvent", "id": "end"}
-    ]
-}
-```
-'''
+    parts = ["# Complete BPMN Examples", ""]
+    for i, (header, example) in enumerate(zip(headers, [example_1, example_2, example_3, example_4]), 1):
+        parts.append("## Example %d: %s" % (i, header))
+        parts.append("**%s**" % note)
+        parts.append("")
+        parts.append("```json")
+        parts.append(json.dumps(example, indent=2))
+        parts.append("```")
+        parts.append("")
+    return "\n".join(parts)
 
 
-
-GENERIC_STRUCTURE_HINT = """
-STRUCTURE GUIDANCE:
-- Model every conditional described in the text ("if", "in case of",
-  "depending on", etc.) as an exclusiveGateway or inclusiveGateway with
-  has_join: true, using the branches actually described in the text.
-- Model activities the text describes as happening concurrently or in any
-  order (e.g. "meanwhile", "at the same time", "in parallel", "in any order")
-  as a parallelGateway with one branch per concurrent activity/role.
-- Do not invent tasks, roles, or conditions that are not stated or clearly
-  implied by the text, and do not omit steps that are explicitly stated.
-"""
+ENHANCED_EXAMPLES = _build_examples()
 
 
 
@@ -309,443 +280,400 @@ class BPMNValidationResult:
 
 
 class EnhancedBPMNGenerator:
+    """LLM-based BPMN generator (Stage 1) with depth-first task extraction (Stage 2)."""
 
+    DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
+    DEFAULT_MODEL = "deepseek-chat"
 
-    def __init__(self, api_key: str = None, base_url: str = None, debug: bool = True):
-        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY", "")
-        self.base_url = base_url or "https://api.deepseek.com/v1"
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        debug: bool = True,
+        temperature: float = 0.3,
+        max_tokens: int = 2500,
+        timeout: int = 90,
+    ):
+        self.api_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY", "")
+        self.base_url = base_url or self.DEFAULT_BASE_URL
+        self.model = model or self.DEFAULT_MODEL
         self.debug = debug
-        self.system_prompt = self._build_enhanced_prompt()
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.timeout = timeout
+        self.system_prompt = self._build_system_prompt()
         self.stats = {
             "total_requests": 0,
             "successful_generations": 0,
             "failed_generations": 0,
             "total_gateways_detected": 0,
-            "total_llm_attempts": 0,
-            "requests_needing_retry": 0
         }
 
-    def _build_enhanced_prompt(self) -> str:
-        return f"""You are a world-class BPMN expert.
-Convert natural language process descriptions into structured BPMN JSON.
 
-{ENHANCED_BPMN_PROMPT}
-
-{ENHANCED_EXAMPLES}
-
----
-
-## CRITICAL REQUIREMENTS (summary)
-
-1. **RULE A — Independent categories:** parallelGateway with one branch per
-   category the text actually describes; the branch count and the task
-   count inside each branch come only from the text, never from a fixed
-   target.
-2. **RULE B — Multi-role:** One branch per department/role.
-3. **RULE C — Nested logic:** Nest gateways inside branches.
-4. **RULE D — Granularity:** One task = one atomic action.
-5. **RULE E — Structural validity:**
-   - EVERY exclusiveGateway and inclusiveGateway MUST have "has_join": true
-   - EVERY gateway MUST have at least 2 branches
-   - ALL element IDs must be globally unique
-
-6. **TASK COUNT DISCIPLINE:** There is NO fixed or target task count for
-   any scenario, topic, or domain. The number of tasks, branches, and
-   gateways must be derived only from what this specific input text
-   states or clearly implies. Never let the subject matter or topic of
-   the process push the count toward a remembered number — count only
-   what this specific text describes.
-
-7. **Output format:** Output ONLY valid JSON, no prose outside the code block.
-
-Now analyze the input and generate BPMN JSON with MAXIMUM accuracy."""
+    @staticmethod
+    def _build_system_prompt() -> str:
+        return (
+            "You are an expert in BPMN process modeling.\n"
+            "Convert natural language process descriptions into structured BPMN JSON.\n\n"
+            + ENHANCED_BPMN_PROMPT
+            + "\n"
+            + ENHANCED_EXAMPLES
+            + "\n---\n\n"
+            "Output only valid JSON inside a single code block, with no prose "
+            "outside the code block."
+        )
 
     def generate(
         self,
         process_description: str,
         max_retries: int = 3,
-        validate: bool = True
+        validate: bool = True,
     ) -> Dict[str, Any]:
+
         self.stats["total_requests"] += 1
 
         if self.debug:
-            print("\n" + "="*70)
-            print("Enhanced BPMN Generator v2.3-fix - Starting Generation")
-            print("="*70)
+            print("\n" + "=" * 70)
+            print("Enhanced BPMN Generator - Stage 1")
+            print("=" * 70)
 
-        raw_bpmn = self._generate_with_llm(process_description, max_retries)
+        bpmn: Optional[Dict[str, Any]] = None
+        validation = BPMNValidationResult(True, [], [], {})
+        last_reason = "no attempt was made"
 
-        if not raw_bpmn or "process" not in raw_bpmn:
+        for attempt in range(1, max_retries + 1):
+            if self.debug:
+                print("\n[LLM call] attempt %d/%d" % (attempt, max_retries))
+
+            candidate = self._call_llm(process_description)
+            if candidate is None:
+                last_reason = "LLM call failed or returned unparsable output"
+                continue
+
+            self._normalize_task_types(candidate["process"])
+            result = self._validate_bpmn(candidate) if validate else validation
+            if result.is_valid:
+                bpmn, validation = candidate, result
+                break
+
+            last_reason = "validation failed: " + "; ".join(result.errors)
+            if self.debug:
+                print("  validation failed: %s" % result.errors)
+
+        if bpmn is None:
             self.stats["failed_generations"] += 1
-            return self._generate_fallback(process_description)
+            return self._generate_fallback(last_reason)
 
-
-        raw_bpmn = self._post_process_bpmn(raw_bpmn, process_description)
-
+        self._normalize_join_flags(bpmn["process"])
         self.stats["successful_generations"] += 1
+        return self._assemble_output(bpmn, validation, is_fallback=False)
 
-        if validate:
-            validation = self._validate_bpmn(raw_bpmn)
-        else:
-            validation = BPMNValidationResult(True, [], [], {})
+    def _call_llm(self, process_description: str) -> Optional[Dict[str, Any]]:
 
-        enhanced_info = self._extract_enhanced_info(raw_bpmn)
-        evaluation_format = self._convert_to_evaluation_format(raw_bpmn, enhanced_info)
-        self.stats["total_gateways_detected"] += enhanced_info["gateway_count"]
+        user_prompt = (
+            "Process description:\n%s\n\n"
+            "Generate the complete BPMN JSON following all modeling rules.\n\n"
+            "BPMN JSON:" % process_description
+        )
+        try:
+            response = requests.post(
+                "%s/chat/completions" % self.base_url,
+                headers={
+                    "Authorization": "Bearer %s" % self.api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": self.system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": self.max_tokens,
+                    "temperature": self.temperature,
+                },
+                timeout=self.timeout,
+            )
+            if response.status_code != 200:
+                raise RuntimeError("API error: %s" % response.status_code)
+            content = response.json()["choices"][0]["message"]["content"]
+            bpmn = self._parse_json(content)
+            if not bpmn or not isinstance(bpmn.get("process"), list):
+                raise ValueError("Output is not a valid BPMN structure")
+            return bpmn
+        except Exception as exc:
+            if self.debug:
+                print("  LLM attempt failed: %s" % exc)
+            return None
+
+    @staticmethod
+    def _parse_json(content: str) -> Optional[Dict[str, Any]]:
+
+        for block in re.findall(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL):
+            try:
+                return json.loads(block)
+            except json.JSONDecodeError:
+                break
+        start, end = content.find("{"), content.rfind("}") + 1
+        if start != -1 and end > start:
+            try:
+                return json.loads(content[start:end])
+            except json.JSONDecodeError:
+                pass
+        return None
+
+
+    def _validate_bpmn(self, bpmn: Dict[str, Any]) -> BPMNValidationResult:
+        """
+        Structural validation:
+          1) exactly one startEvent and at least one endEvent;
+          2) global uniqueness of element IDs;
+          3) gateway branch counts match the number of extracted conditions
+             (exclusive and inclusive gateways).
+        """
+        errors: List[str] = []
+        process = bpmn.get("process")
+        if not isinstance(process, list) or not process:
+            return BPMNValidationResult(False, ["Empty or missing process"], [], {})
+
+        elements = list(self._iter_elements(process))
+
+        n_start = sum(1 for e in elements if e.get("type") == "startEvent")
+        n_end = sum(1 for e in elements if e.get("type") == "endEvent")
+        if n_start != 1:
+            errors.append("Expected exactly one startEvent, found %d" % n_start)
+        if n_end < 1:
+            errors.append("Missing endEvent")
+
+        ids = [e.get("id") for e in elements]
+        if any(not i for i in ids):
+            errors.append("Element without id")
+        duplicates = sorted({i for i in ids if i and ids.count(i) > 1})
+        if duplicates:
+            errors.append("Duplicate element IDs: %s" % duplicates[:5])
+
+        for elem in elements:
+            if elem.get("type") in CONDITIONAL_GATEWAY_TYPES:
+                branches = elem.get("branches", [])
+                n_conditions = sum(
+                    1 for b in branches
+                    if isinstance(b, dict) and str(b.get("condition", "")).strip()
+                )
+                if len(branches) != n_conditions:
+                    errors.append(
+                        "Gateway %s has %d branches but %d conditions"
+                        % (elem.get("id"), len(branches), n_conditions)
+                    )
+
+        return BPMNValidationResult(
+            is_valid=not errors,
+            errors=errors,
+            warnings=[],
+            statistics=self._count_elements(elements),
+        )
+
+    @staticmethod
+    def _count_elements(elements: List[Dict[str, Any]]) -> Dict[str, int]:
+        stats = {"total_elements": len(elements), "tasks": 0, "gateways": 0, "events": 0}
+        for elem in elements:
+            etype = elem.get("type", "")
+            if etype in TASK_TYPES:
+                stats["tasks"] += 1
+            elif etype in GATEWAY_TYPES:
+                stats["gateways"] += 1
+            elif etype in ("startEvent", "endEvent"):
+                stats["events"] += 1
+        return stats
+
+
+    @staticmethod
+    def _branch_elements(branch: Any) -> List[Any]:
+
+        if isinstance(branch, list):
+            return branch
+        if isinstance(branch, dict):
+            path = branch.get("path", [])
+            return path if isinstance(path, list) else []
+        return []
+
+    def _iter_elements(self, elements: List[Any]) -> Iterator[Dict[str, Any]]:
+
+        for elem in elements:
+            if not isinstance(elem, dict):
+                continue
+            yield elem
+            for branch in elem.get("branches", []) or []:
+                yield from self._iter_elements(self._branch_elements(branch))
+
+    def _find_element(self, elements: List[Any], element_id: str) -> Optional[Dict[str, Any]]:
+        for elem in self._iter_elements(elements):
+            if elem.get("id") == element_id:
+                return elem
+        return None
+
+    def _normalize_task_types(self, process: List[Any]) -> None:
+
+        for elem in self._iter_elements(process):
+            if elem.get("type") == "task":
+                elem["type"] = "userTask"
+
+    def _normalize_join_flags(self, process: List[Any]) -> None:
+
+        for elem in self._iter_elements(process):
+            if elem.get("type") in GATEWAY_TYPES:
+                elem["has_join"] = True
+
+
+    def extract_tasks(self, bpmn: Dict[str, Any]) -> List[Dict[str, Any]]:
+
+        tasks: List[Dict[str, Any]] = []
+        self._traverse(bpmn.get("process", []), 0, None, None, tasks, [])
+        return tasks
+
+    def _traverse(
+        self,
+        elements: List[Any],
+        depth: int,
+        gateway_id: Optional[str],
+        branch_index: Optional[int],
+        tasks: List[Dict[str, Any]],
+        gateways: List[Dict[str, Any]],
+    ) -> None:
+        for elem in elements:
+            if not isinstance(elem, dict):
+                continue
+            etype = elem.get("type", "")
+
+            if etype in TASK_TYPES:
+                name = elem.get("label", "")
+                tasks.append({
+                    "id": elem.get("id"),
+                    "name": name,
+                    "type": etype,
+                    "description": elem.get("description") or name,
+                    "depth": depth,
+                    "gateway_context": {
+                        "gateway_id": gateway_id,
+                        "branch_index": branch_index,
+                        "depth": depth,
+                    },
+                })
+
+            elif etype in GATEWAY_TYPES:
+                branches = elem.get("branches", []) or []
+                gateways.append({
+                    "id": elem.get("id"),
+                    "type": etype.replace("Gateway", ""),
+                    "label": elem.get("label", ""),
+                    "has_join": elem.get("has_join", True),
+                    "branch_count": len(branches),
+                    "depth": depth,
+                    "conditions": [
+                        b["condition"] for b in branches
+                        if isinstance(b, dict) and b.get("condition")
+                    ],
+                })
+                for index, branch in enumerate(branches):
+                    self._traverse(
+                        self._branch_elements(branch), depth + 1,
+                        elem.get("id"), index, tasks, gateways,
+                    )
+
+    def _extract_enhanced_info(self, bpmn: Dict[str, Any]) -> Dict[str, Any]:
+        tasks: List[Dict[str, Any]] = []
+        gateways: List[Dict[str, Any]] = []
+        self._traverse(bpmn.get("process", []), 0, None, None, tasks, gateways)
+        return {
+            "task_count": len(tasks),
+            "gateway_count": len(gateways),
+            "exclusive_count": sum(1 for g in gateways if g["type"] == "exclusive"),
+            "parallel_count": sum(1 for g in gateways if g["type"] == "parallel"),
+            "inclusive_count": sum(1 for g in gateways if g["type"] == "inclusive"),
+            "tasks": tasks,
+            "gateways": gateways,
+        }
+
+    def _build_condition_set(self, process: List[Any]) -> List[Dict[str, Any]]:
+
+        condition_set = []
+        for elem in self._iter_elements(process):
+            if elem.get("type") not in CONDITIONAL_GATEWAY_TYPES:
+                continue
+            for index, branch in enumerate(elem.get("branches", []) or []):
+                if isinstance(branch, dict) and branch.get("condition"):
+                    condition_set.append({
+                        "gateway_id": elem.get("id"),
+                        "branch_index": index,
+                        "condition": branch["condition"],
+                    })
+        return condition_set
+
+
+    def _assemble_output(
+        self,
+        bpmn: Dict[str, Any],
+        validation: BPMNValidationResult,
+        is_fallback: bool,
+    ) -> Dict[str, Any]:
+        bpmn["condition_set"] = self._build_condition_set(bpmn.get("process", []))
+        info = self._extract_enhanced_info(bpmn)
+        evaluation_format = self._convert_to_evaluation_format(bpmn, info)
+        self.stats["total_gateways_detected"] += info["gateway_count"]
 
         if self.debug:
-            print(f"\n[Statistics]")
-            print(f"  Tasks: {enhanced_info['task_count']}")
-            print(f"  Gateways: {enhanced_info['gateway_count']}")
-            print(f"    - Exclusive: {enhanced_info['exclusive_count']}")
-            print(f"    - Parallel: {enhanced_info['parallel_count']}")
-            print(f"    - Inclusive: {enhanced_info['inclusive_count']}")
+            print("\n[Statistics]")
+            print("  Tasks: %d" % info["task_count"])
+            print("  Gateways: %d (exclusive %d, parallel %d, inclusive %d)" % (
+                info["gateway_count"], info["exclusive_count"],
+                info["parallel_count"], info["inclusive_count"]))
 
+        metadata = {
+            "generator": "EnhancedBPMNGenerator",
+            "timestamp": datetime.now().isoformat(),
+            "is_fallback": is_fallback,
+        }
         return {
-            "bpmn_workflow": raw_bpmn,
+            "bpmn_workflow": bpmn,
             "evaluation_format": evaluation_format,
-            "enhanced_info": enhanced_info,
+            "enhanced_info": info,
             "validation": {
                 "is_valid": validation.is_valid,
                 "errors": validation.errors,
-                "warnings": validation.warnings
+                "warnings": validation.warnings,
             },
-            "metadata": {
-                "generator": "EnhancedBPMNGenerator v2.3-fix",
-                "timestamp": self._get_timestamp(),
-                "input_length": len(process_description)
-            }
+            "metadata": metadata,
         }
 
-    def _generate_with_llm(self, process_description: str, max_retries: int) -> Optional[Dict]:
-
-        user_prompt = f"""Process description:
-{process_description}
-{GENERIC_STRUCTURE_HINT}
-
-Generate the complete BPMN JSON following ALL rules above.
-Remember:
-- RULE E: every exclusiveGateway and inclusiveGateway MUST have "has_join": true
-- Base the task count and structure purely on what this specific text
-  describes; do not target any fixed number of tasks.
-
-BPMN JSON:"""
-
-        for attempt in range(max_retries):
-            self.stats["total_llm_attempts"] += 1
-            try:
-                if self.debug:
-                    print(f"\n[LLM Call] Attempt {attempt + 1}/{max_retries}")
-
-                response = requests.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "deepseek-chat",
-                        "messages": [
-                            {"role": "system", "content": self.system_prompt},
-                            {"role": "user", "content": user_prompt}
-                        ],
-                        "max_tokens": 2500,
-                        "temperature": 0.3
-                    },
-                    timeout=90
-                )
-
-                if response.status_code == 200:
-                    result = response.json()
-                    content = result["choices"][0]["message"]["content"]
-                    bpmn_workflow = self._parse_json(content)
-                    if bpmn_workflow and "process" in bpmn_workflow:
-                        if self.debug:
-                            print(f"  ✓ Successfully generated BPMN")
-                        if attempt > 0:
-                            self.stats["requests_needing_retry"] += 1
-                        return bpmn_workflow
-                    else:
-                        raise ValueError("Invalid BPMN structure")
-                else:
-                    raise Exception(f"API error: {response.status_code}")
-
-            except Exception as e:
-                if self.debug:
-                    print(f"  ✗ Attempt {attempt + 1} failed: {e}")
-                if attempt == max_retries - 1:
-                    return None
-
-        return None
-
-    def _post_process_bpmn(self, bpmn: Dict, description: str) -> Dict:
+    def _convert_to_evaluation_format(
+        self, bpmn: Dict[str, Any], info: Dict[str, Any]
+    ) -> Dict[str, Any]:
 
         process = bpmn.get("process", [])
-        self._fix_has_join_recursive(process)
-        self._ensure_unique_ids(process)
-        return bpmn
-
-    def _fix_has_join_recursive(self, elements: List):
-
-        for elem in elements:
-            if not isinstance(elem, dict):
-                continue
-
-            elem_type = elem.get("type", "")
-
-
-            if elem_type in ["exclusiveGateway", "inclusiveGateway"]:
-                elem["has_join"] = True
-
-            if "branches" in elem:
-                for branch in elem["branches"]:
-                    if isinstance(branch, list):
-                        self._fix_has_join_recursive(branch)
-                    elif isinstance(branch, dict) and "path" in branch:
-                        self._fix_has_join_recursive(branch["path"])
-
-    def _ensure_unique_ids(self, elements: List, seen_ids: set = None):
-        """确保所有ID唯一"""
-        if seen_ids is None:
-            seen_ids = set()
-
-        counter = [0]
-
-        def fix_ids(elems):
-            for elem in elems:
-                if not isinstance(elem, dict):
-                    continue
-                elem_id = elem.get("id", "")
-                if elem_id:
-                    if elem_id in seen_ids:
-                        counter[0] += 1
-                        new_id = f"{elem_id}_dup{counter[0]}"
-                        elem["id"] = new_id
-                        seen_ids.add(new_id)
-                    else:
-                        seen_ids.add(elem_id)
-
-                if "branches" in elem:
-                    for branch in elem["branches"]:
-                        if isinstance(branch, list):
-                            fix_ids(branch)
-                        elif isinstance(branch, dict) and "path" in branch:
-                            fix_ids(branch["path"])
-
-        fix_ids(elements)
-
-    def _parse_json(self, content: str) -> Optional[Dict]:
-        """解析LLM输出的JSON"""
-        json_pattern = r'```(?:json)?\s*(.*?)\s*```'
-        matches = re.findall(json_pattern, content, re.DOTALL)
-        if matches:
-            try:
-                return json.loads(matches[0])
-            except json.JSONDecodeError:
-                pass
-        try:
-            start = content.find('{')
-            end = content.rfind('}') + 1
-            if start != -1 and end > start:
-                return json.loads(content[start:end])
-        except json.JSONDecodeError:
-            pass
-        return None
-
-    def _validate_bpmn(self, bpmn: Dict) -> BPMNValidationResult:
-        """验证BPMN工作流"""
-        errors = []
-        warnings = []
-
-        process = bpmn.get("process", [])
-        if not process:
-            errors.append("Empty process")
-            return BPMNValidationResult(False, errors, warnings, {})
-
-        has_start = any(e.get("type") == "startEvent" for e in process)
-        has_end = self._has_end_event_recursive(process)
-
-        if not has_start:
-            errors.append("Missing startEvent")
-        if not has_end:
-            errors.append("Missing endEvent")
-
-        all_ids = self._collect_all_ids(process)
-        if len(all_ids) != len(set(all_ids)):
-            warnings.append("Duplicate IDs found (auto-fixed)")
-
-        stats = self._count_elements(process)
-
-        missing_join = self._check_has_join(process)
-        if missing_join:
-            warnings.append(f"Gateways fixed has_join: {missing_join[:3]}")
-
-        return BPMNValidationResult(
-            is_valid=len(errors) == 0,
-            errors=errors,
-            warnings=warnings,
-            statistics=stats
-        )
-
-    def _check_has_join(self, elements: List) -> List[str]:
-        missing = []
-        for elem in elements:
-            if not isinstance(elem, dict):
-                continue
-            elem_type = elem.get("type", "")
-            if elem_type in ["exclusiveGateway", "inclusiveGateway"]:
-                if not elem.get("has_join", False):
-                    missing.append(elem.get("id", "unknown"))
-            if "branches" in elem:
-                for branch in elem["branches"]:
-                    if isinstance(branch, list):
-                        missing.extend(self._check_has_join(branch))
-                    elif isinstance(branch, dict) and "path" in branch:
-                        missing.extend(self._check_has_join(branch["path"]))
-        return missing
-
-    def _has_end_event_recursive(self, elements: List) -> bool:
-        for elem in elements:
-            if elem.get("type") == "endEvent":
-                return True
-            if "branches" in elem:
-                for branch in elem["branches"]:
-                    if isinstance(branch, list):
-                        if self._has_end_event_recursive(branch):
-                            return True
-                    elif isinstance(branch, dict) and "path" in branch:
-                        if self._has_end_event_recursive(branch["path"]):
-                            return True
-        return False
-
-    def _collect_all_ids(self, elements: List, ids: Optional[List] = None) -> List[str]:
-        if ids is None:
-            ids = []
-        for elem in elements:
-            if "id" in elem:
-                ids.append(elem["id"])
-            if "branches" in elem:
-                for branch in elem["branches"]:
-                    if isinstance(branch, list):
-                        self._collect_all_ids(branch, ids)
-                    elif isinstance(branch, dict) and "path" in branch:
-                        self._collect_all_ids(branch["path"], ids)
-        return ids
-
-    def _count_elements(self, elements: List) -> Dict[str, int]:
-        stats = {"total_elements": 0, "tasks": 0, "gateways": 0, "events": 0}
-        task_types = {"task", "userTask", "serviceTask", "sendTask",
-                      "receiveTask", "businessRuleTask", "manualTask", "scriptTask"}
-        gateway_types = {"exclusiveGateway", "parallelGateway",
-                         "inclusiveGateway", "eventBasedGateway"}
-        event_types = {"startEvent", "endEvent",
-                       "intermediateCatchEvent", "intermediateThrowEvent"}
-
-        def count_recursive(elems):
-            for elem in elems:
-                stats["total_elements"] += 1
-                t = elem.get("type", "")
-                if t in task_types:
-                    stats["tasks"] += 1
-                elif t in gateway_types:
-                    stats["gateways"] += 1
-                elif t in event_types:
-                    stats["events"] += 1
-                if "branches" in elem:
-                    for branch in elem["branches"]:
-                        if isinstance(branch, list):
-                            count_recursive(branch)
-                        elif isinstance(branch, dict) and "path" in branch:
-                            count_recursive(branch["path"])
-
-        count_recursive(elements)
-        return stats
-
-    def _extract_enhanced_info(self, bpmn: Dict) -> Dict[str, Any]:
-        info = {
-            "task_count": 0, "gateway_count": 0,
-            "exclusive_count": 0, "parallel_count": 0,
-            "inclusive_count": 0, "eventbased_count": 0,
-            "tasks": [], "gateways": []
-        }
-
-        def extract_recursive(elements, depth=0):
-            for elem in elements:
-                elem_type = elem.get("type", "")
-
-                if elem_type in {"task", "userTask", "serviceTask", "sendTask",
-                                 "receiveTask", "businessRuleTask", "manualTask", "scriptTask"}:
-                    info["tasks"].append({
-                        "id": elem.get("id"),
-                        "name": elem.get("label", ""),
-                        "type": elem_type,
-                        "depth": depth
-                    })
-                    info["task_count"] += 1
-
-                elif elem_type in {"exclusiveGateway", "parallelGateway",
-                                   "inclusiveGateway", "eventBasedGateway"}:
-                    gateway_info = {
-                        "id": elem.get("id"),
-                        "type": elem_type.replace("Gateway", ""),
-                        "label": elem.get("label", ""),
-                        "has_join": elem.get("has_join", False),
-                        "branch_count": len(elem.get("branches", [])),
-                        "depth": depth,
-                        "conditions": []
-                    }
-                    if "branches" in elem:
-                        for branch in elem["branches"]:
-                            if isinstance(branch, dict) and "condition" in branch:
-                                gateway_info["conditions"].append(branch["condition"])
-                    info["gateways"].append(gateway_info)
-                    info["gateway_count"] += 1
-                    if elem_type == "exclusiveGateway":
-                        info["exclusive_count"] += 1
-                    elif elem_type == "parallelGateway":
-                        info["parallel_count"] += 1
-                    elif elem_type == "inclusiveGateway":
-                        info["inclusive_count"] += 1
-                    elif elem_type == "eventBasedGateway":
-                        info["eventbased_count"] += 1
-
-                if "branches" in elem:
-                    for branch in elem["branches"]:
-                        if isinstance(branch, list):
-                            extract_recursive(branch, depth + 1)
-                        elif isinstance(branch, dict) and "path" in branch:
-                            extract_recursive(branch["path"], depth + 1)
-
-        extract_recursive(bpmn.get("process", []))
-        return info
-
-    def _convert_to_evaluation_format(self, bpmn: Dict, enhanced_info: Dict) -> Dict[str, Any]:
-
-        tasks = enhanced_info["tasks"]
-        dependencies = self._build_complete_dependencies(bpmn.get("process", []))
-        gateway_contexts = self._build_gateway_contexts(enhanced_info["gateways"], dependencies)
+        dependencies = self._build_dependencies(process)
 
         gateways = []
-        for gw in enhanced_info["gateways"]:
-            gw_type = gw["type"]
-
-
-            original_id = gw["id"]  # 例如 "eg_amount", "pg_parallel", "ig_insurance"
-
-            gw_tasks = self._extract_gateway_tasks(bpmn, original_id)
-            entry_point = self._infer_gateway_entry(bpmn, original_id)
-            merge_point = self._infer_gateway_merge(bpmn, original_id) if gw["has_join"] else None
+        for gw in info["gateways"]:
+            gw_id = gw["id"]
+            element = self._find_element(process, gw_id) or {}
+            task_ids = [
+                e.get("id") for branch in element.get("branches", []) or []
+                for e in self._iter_elements(self._branch_elements(branch))
+                if e.get("type") in TASK_TYPES
+            ]
+            entry_point = next((d["source"] for d in dependencies if d["target"] == gw_id), None)
+            join_id = "%s_join" % gw_id
+            merge_point = join_id if any(d["target"] == join_id for d in dependencies) else None
 
             gateway_obj = {
-                "id": original_id,
-                "type": gw_type,
+                "id": gw_id,
+                "type": gw["type"],
                 "tasks": {
-                    "tasks": gw_tasks,
-                    "type": gw_type,
+                    "tasks": task_ids,
+                    "type": gw["type"],
                     "pattern": "fork",
-                    "id": original_id,
-                    "entry_point": entry_point
-                }
+                    "id": gw_id,
+                    "entry_point": entry_point,
+                },
             }
             if merge_point:
                 gateway_obj["tasks"]["merge_point"] = merge_point
@@ -755,216 +683,127 @@ BPMN JSON:"""
 
         return {
             "tasks": [
-                {"task_id": t["id"], "name": t["name"], "type": t["type"], "description": t["name"]}
-                for t in tasks
+                {
+                    "task_id": t["id"],
+                    "name": t["name"],
+                    "type": t["type"],
+                    "description": t["description"],
+                    "gateway_context": t["gateway_context"],
+                }
+                for t in info["tasks"]
             ],
             "dependencies": dependencies,
             "gateways": gateways,
-            "contexts": gateway_contexts
+            "contexts": self._build_gateway_contexts(info["gateways"], dependencies),
+            "api_bindings": [],
         }
 
-    def _build_complete_dependencies(self, process: List) -> List[Dict]:
-        dependencies = []
+    def _build_dependencies(self, process: List[Any]) -> List[Dict[str, str]]:
+        """Dependency graph; every gateway fork is closed by an explicit join node."""
+        dependencies: List[Dict[str, str]] = []
+        seen = set()
 
-        def build_recursive(elements, predecessor_id=None):
-            if not elements:
-                return predecessor_id
-            prev_id = predecessor_id
+        def add(source: Optional[str], target: str) -> None:
+            if source and target and (source, target) not in seen:
+                seen.add((source, target))
+                dependencies.append({"source": source, "target": target})
 
+        def build(elements: List[Any], predecessor: Optional[str]) -> Optional[str]:
+            prev = predecessor
             for elem in elements:
-                if not isinstance(elem, dict):
+                if not isinstance(elem, dict) or not elem.get("id"):
                     continue
-                elem_type = elem.get("type", "")
-                elem_id = elem.get("id")
-                if not elem_id:
-                    continue
+                elem_id = elem["id"]
+                add(prev, elem_id)
 
-                if prev_id:
-                    dependencies.append({"source": prev_id, "target": elem_id})
-
-                if elem_type in ["exclusiveGateway", "parallelGateway",
-                                  "inclusiveGateway", "eventBasedGateway"]:
-                    gateway_id = elem_id
-                    branches = elem.get("branches", [])
-                    branch_endings = []
-
-                    for branch in branches:
-                        if isinstance(branch, list):
-                            last_id = build_recursive(branch, gateway_id)
-                            if last_id:
-                                branch_endings.append(last_id)
-                        elif isinstance(branch, dict) and "path" in branch:
-                            last_id = build_recursive(branch["path"], gateway_id)
-                            if last_id:
-                                branch_endings.append(last_id)
-
-                    if elem.get("has_join", False) and branch_endings:
-                        join_id = f"{gateway_id}_join"
-                        for ending_id in branch_endings:
-                            dependencies.append({"source": ending_id, "target": join_id})
-                        prev_id = join_id
-                    elif branch_endings:
-                        prev_id = branch_endings[-1]
+                if elem.get("type") in GATEWAY_TYPES:
+                    endings = [
+                        build(self._branch_elements(branch), elem_id)
+                        for branch in elem.get("branches", []) or []
+                    ]
+                    if endings:
+                        join_id = "%s_join" % elem_id
+                        for ending in endings:
+                            add(ending, join_id)
+                        prev = join_id
                     else:
-                        prev_id = gateway_id
+                        prev = elem_id
                 else:
-                    prev_id = elem_id
+                    prev = elem_id
+            return prev
 
-            return prev_id
-
-        build_recursive(process)
+        build(process, None)
         return dependencies
 
-    def _build_gateway_contexts(self, gateways: List[Dict], dependencies: List[Dict]) -> List[Dict]:
-        contexts = []
-        in_degree = {}
-        out_degree = {}
-        predecessors = {}
-        successors = {}
+    @staticmethod
+    def _build_gateway_contexts(
+        gateways: List[Dict[str, Any]], dependencies: List[Dict[str, str]]
+    ) -> List[Dict[str, Any]]:
 
+        in_degree: Dict[str, int] = {}
+        out_degree: Dict[str, int] = {}
+        predecessors: Dict[str, List[str]] = {}
+        successors: Dict[str, List[str]] = {}
         for dep in dependencies:
-            source = dep.get("source", "")
-            target = dep.get("target", "")
-            if not source or not target:
-                continue
+            source, target = dep["source"], dep["target"]
             out_degree[source] = out_degree.get(source, 0) + 1
             successors.setdefault(source, []).append(target)
             in_degree[target] = in_degree.get(target, 0) + 1
             predecessors.setdefault(target, []).append(source)
 
+        def record(node_id: str, node_type: str) -> Dict[str, Any]:
+            return {
+                "id": node_id,
+                "type": node_type,
+                "in_degree": in_degree.get(node_id, 0),
+                "out_degree": out_degree.get(node_id, 0),
+                "predecessors": predecessors.get(node_id, []),
+                "successors": successors.get(node_id, []),
+            }
+
+        contexts = []
         for gw in gateways:
-            gw_id = gw.get("id", "")
-            gw_type = gw.get("type", "unknown")
-            join_id = f"{gw_id}_join"
-
-            contexts.append({
-                "id": gw_id, "type": gw_type,
-                "in_degree": in_degree.get(gw_id, 0),
-                "out_degree": out_degree.get(gw_id, 0),
-                "predecessors": predecessors.get(gw_id, []),
-                "successors": successors.get(gw_id, [])
-            })
-
+            gw_id, gw_type = gw["id"], gw["type"]
+            join_id = "%s_join" % gw_id
+            contexts.append(record(gw_id, gw_type))
             if join_id in in_degree or join_id in out_degree:
-                contexts.append({
-                    "id": join_id, "type": f"{gw_type}_join",
-                    "in_degree": in_degree.get(join_id, 0),
-                    "out_degree": out_degree.get(join_id, 0),
-                    "predecessors": predecessors.get(join_id, []),
-                    "successors": successors.get(join_id, [])
-                })
-
+                contexts.append(record(join_id, "%s_join" % gw_type))
         return contexts
 
-    def _extract_gateway_tasks(self, bpmn: Dict, gateway_id: str) -> List[str]:
-        tasks = []
 
-        def find_gateway_and_extract(elements):
-            for elem in elements:
-                if elem.get("id") == gateway_id and "branches" in elem:
-                    for branch in elem["branches"]:
-                        if isinstance(branch, list):
-                            tasks.extend(self._extract_task_ids(branch))
-                        elif isinstance(branch, dict) and "path" in branch:
-                            tasks.extend(self._extract_task_ids(branch["path"]))
-                    return True
-                if "branches" in elem:
-                    for branch in elem["branches"]:
-                        if isinstance(branch, list):
-                            if find_gateway_and_extract(branch): return True
-                        elif isinstance(branch, dict) and "path" in branch:
-                            if find_gateway_and_extract(branch["path"]): return True
-            return False
 
-        find_gateway_and_extract(bpmn.get("process", []))
-        return tasks
+    def _generate_fallback(self, reason: str) -> Dict[str, Any]:
 
-    def _extract_task_ids(self, elements: List) -> List[str]:
-        task_ids = []
-        task_types = {"task", "userTask", "serviceTask", "sendTask",
-                      "receiveTask", "businessRuleTask", "manualTask", "scriptTask"}
-        for elem in elements:
-            if elem.get("type") in task_types:
-                task_ids.append(elem.get("id"))
-            if "branches" in elem:
-                for branch in elem["branches"]:
-                    if isinstance(branch, list):
-                        task_ids.extend(self._extract_task_ids(branch))
-                    elif isinstance(branch, dict) and "path" in branch:
-                        task_ids.extend(self._extract_task_ids(branch["path"]))
-        return task_ids
-
-    def _infer_gateway_entry(self, bpmn: Dict, gateway_id: str) -> Optional[str]:
-        process = bpmn.get("process", [])
-        for i, elem in enumerate(process):
-            if elem.get("id") == gateway_id:
-                if i > 0:
-                    return process[i - 1].get("id")
-                break
-        return None
-
-    def _infer_gateway_merge(self, bpmn: Dict, gateway_id: str) -> Optional[str]:
-        process = bpmn.get("process", [])
-        for i, elem in enumerate(process):
-            if elem.get("id") == gateway_id:
-                if i < len(process) - 1:
-                    return process[i + 1].get("id")
-                break
-        return None
-
-    def _generate_fallback(self, process_description: str) -> Dict[str, Any]:
         if self.debug:
-            print("\n[Fallback] Generating simple template")
-        fallback_bpmn = {
+            print("\n[Fallback] using the sequential template (%s)" % reason)
+        bpmn = {
             "process": [
                 {"type": "startEvent", "id": "start"},
-                {"type": "userTask", "id": "task1", "label": "Process request"},
-                {"type": "serviceTask", "id": "task2", "label": "Execute action"},
-                {"type": "userTask", "id": "task3", "label": "Complete process"},
-                {"type": "endEvent", "id": "end"}
+                {"type": "userTask", "id": "task_1", "label": "Process request",
+                 "description": "Process the incoming request."},
+                {"type": "serviceTask", "id": "task_2", "label": "Execute action",
+                 "description": "Execute the required action."},
+                {"type": "userTask", "id": "task_3", "label": "Complete process",
+                 "description": "Complete the process."},
+                {"type": "endEvent", "id": "end"},
             ]
         }
-        return {
-            "bpmn_workflow": fallback_bpmn,
-            "evaluation_format": {
-                "tasks": [
-                    {"task_id": "task1", "name": "Process request", "type": "userTask", "description": "Process request"},
-                    {"task_id": "task2", "name": "Execute action", "type": "serviceTask", "description": "Execute action"},
-                    {"task_id": "task3", "name": "Complete process", "type": "userTask", "description": "Complete process"}
-                ],
-                "dependencies": [
-                    {"source": "task1", "target": "task2"},
-                    {"source": "task2", "target": "task3"}
-                ],
-                "gateways": []
-            },
-            "enhanced_info": {
-                "task_count": 3, "gateway_count": 0,
-                "exclusive_count": 0, "parallel_count": 0,
-                "inclusive_count": 0, "eventbased_count": 0,
-                "tasks": [], "gateways": []
-            },
-            "validation": {"is_valid": True, "errors": [], "warnings": ["Using fallback template"]},
-            "metadata": {
-                "generator": "EnhancedBPMNGenerator v2.3-fix (Fallback)",
-                "timestamp": self._get_timestamp(),
-                "is_fallback": True
-            }
-        }
+        validation = BPMNValidationResult(
+            True, [], ["Using fallback template: %s" % reason], {}
+        )
+        return self._assemble_output(bpmn, validation, is_fallback=True)
 
-    def _get_timestamp(self) -> str:
-        from datetime import datetime
-        return datetime.now().isoformat()
+
 
     def get_statistics(self) -> Dict[str, Any]:
+        total = self.stats["total_requests"]
         return {
             **self.stats,
-            "success_rate": (
-                self.stats["successful_generations"] / self.stats["total_requests"]
-                if self.stats["total_requests"] > 0 else 0
-            )
+            "success_rate": self.stats["successful_generations"] / total if total else 0,
         }
 
 
-def create_enhanced_generator(api_key: str = None, debug: bool = True) -> EnhancedBPMNGenerator:
+def create_enhanced_generator(
+    api_key: Optional[str] = None, debug: bool = True
+) -> EnhancedBPMNGenerator:
     return EnhancedBPMNGenerator(api_key=api_key, debug=debug)

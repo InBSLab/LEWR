@@ -1,350 +1,165 @@
-import re
 import json
 import math
+import re
+import warnings
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 
 class TaskEnhancer:
 
-    VERB_MAPPING = {
 
-        'clarify':    'clarify',
-        'clarifies':  'clarify',
-        'determine':  'determine',
-        'determines': 'determine',
-        'decide':     'decide',
-        'decides':    'decide',
+    STEPS = ("remove_role", "passive_to_active", "verb_standardize", "inject_keywords")
 
 
-        'assess':     'assess',
-        'assesses':   'assess',
-        'evaluate':   'evaluate',
-        'evaluates':  'evaluate',
-        'check':      'check',
-        'checks':     'check',
-        'verify':     'verify',
-        'verifies':   'verify',
-        'validate':   'validate',
-        'validates':  'validate',
-        'inspect':    'inspect',
-        'inspects':   'inspect',
-        'review':     'review',
-        'reviews':    'review',
+    ROLE_LEXICON = [
 
+        "secretary", "manager", "department head", "head", "director",
+        "supervisor", "coordinator", "officer", "clerk", "employee", "staff",
+        "worker", "operator", "agent", "assistant", "administrator",
+        "receptionist",
 
-        'calculate':  'calculate',
-        'calculates': 'calculate',
-        'compute':    'compute',
-        'computes':   'compute',
-        'score':      'score',
-        'scores':     'score',
+        "logistics department head", "logistics head", "warehouse staff",
+        "warehouseman", "warehousemen",
 
+        "analyst", "accountant", "cashier", "teller", "underwriter",
+        "loan officer", "credit officer",
 
-        'approve':    'approve',
-        'approves':   'approve',
-        'approved':   'approve',
-        'reject':     'reject',
-        'rejects':    'reject',
-        'rejected':   'reject',
-        'confirm':    'confirm',
-        'confirms':   'confirm',
-
-
-        'submit':     'submit',
-        'submits':    'submit',
-        'receive':    'receive',
-        'receives':   'receive',
-        'register':   'register',
-        'registers':  'register',
-
-
-        'assign':     'assign',
-        'assigns':    'assign',
-        'schedule':   'schedule',
-        'schedules':  'schedule',
-        'allocate':   'allocate',
-        'allocates':  'allocate',
-
-
-        'monitor':    'monitor',
-        'monitors':   'monitor',
-        'track':      'track',
-        'tracks':     'track',
-        'update':     'update',
-        'updates':    'update',
-
-
-        'cancel':     'cancel',
-        'cancels':    'cancel',
-        'terminate':  'terminate',
-        'terminates': 'terminate',
-
-
-        'write':      'write',
-        'writes':     'write',
-        'written':    'write',
-        'create':     'create',
-        'creates':    'create',
-        'generate':   'generate',
-        'generates':  'generate',
-
-
-        'prepare':    'prepare',
-        'prepares':   'prepare',
-        'prepared':   'prepare',
-        'process':    'process',
-        'processes':  'process',
-        'handle':     'handle',
-        'handles':    'handle',
-        'perform':    'perform',
-        'performs':   'perform',
-        'execute':    'execute',
-        'executes':   'execute',
-
-
-        'invite':     'request',
-        'invites':    'request',
-        'request':    'request',
-        'requests':   'request',
-        'ask':        'request',
-        'asks':       'request',
-        'notify':     'notify',
-        'notifies':   'notify',
-        'inform':     'inform',
-        'informs':    'inform',
-        'send':       'send',
-        'sends':      'send',
-
-
-        'select':     'select',
-        'selects':    'select',
-        'choose':     'choose',
-        'chooses':    'choose',
-        'pick':       'select',
-        'picks':      'select',
-
-
-        'take':       'obtain',
-        'takes':      'obtain',
-        'taken':      'obtain',
-        'get':        'get',
-        'gets':       'get',
-        'obtain':     'obtain',
-        'obtains':    'obtain',
-        'retrieve':   'retrieve',
-        'retrieves':  'retrieve',
-        'fetch':      'retrieve',
-        'fetches':    'retrieve',
-
-
-        'package':    'package',
-        'packages':   'package',
-        'packaged':   'package',
-        'ship':       'ship',
-        'ships':      'ship',
-        'deliver':    'deliver',
-        'delivers':   'deliver',
-
-
-        'make':       'make',
-        'makes':      'make',
-        'do':         'perform',
-        'does':       'perform',
-        'arrange':    'arrange',
-        'arranges':   'arrange',
-        'complete':   'complete',
-        'completes':  'complete',
-        'finalize':   'finalize',
-        'finalizes':  'finalize',
-    }
-
-
-    _FALLBACK_DOMAIN_KEYWORDS = {
-
-        'shipping':    'logistics carrier API',
-        'shipment':    'shipment tracking API',
-        'ship':        'transport delivery service',
-        'dispatch':    'logistics coordination service',
-        'delivery':    'delivery routing API',
-        'carrier':     'carrier selection API',
-        'logistics':   'logistics management API',
-        'freight':     'freight booking service',
-        'transport':   'transportation API',
-        'courier':     'courier dispatch API',
-        'pickup':      'pickup scheduling API',
-        'route':       'route optimization API',
-
-
-        'label':       'label generation API',
-        'package':     'packaging fulfillment service',
-        'parcel':      'parcel handling API',
-        'packing':     'packaging automation service',
-        'barcode':     'barcode generation API',
-        'qr':          'QR code generation API',
-
-
-        'insurance':   'insurance coverage API',
-        'insure':      'insurance purchase service',
-        'coverage':    'coverage calculation API',
-        'premium':     'premium calculation API',
-        'policy':      'insurance policy API',
-
-
-        'warehouse':   'warehouse management API',
-        'storage':     'inventory storage API',
-        'inventory':   'inventory control API',
-        'stock':       'stock management API',
-        'picking':     'warehouse picking API',
-        'goods':       'goods handling API',
-
-
-        'offer':       'quote comparison API',
-        'quote':       'rate pricing API',
-        'bid':         'bidding service API',
-        'price':       'pricing calculation API',
-        'cost':        'cost estimation API',
-        'rate':        'rate lookup API',
-
-
-        'order':       'order management API',
-        'purchase':    'purchase transaction API',
-        'checkout':    'checkout processing API',
-        'cart':        'shopping cart API',
-        'payment':     'payment gateway API',
-        'invoice':     'invoice generation API',
-        'receipt':     'receipt API',
-
-
-        'customer':    'customer management API',
-        'client':      'client service API',
-        'user':        'user management API',
-        'account':     'account management API',
-        'profile':     'user profile API',
-
-
-        'recourse':    'complaint handling API',
-        'claim':       'claim processing API',
-        'complaint':   'complaint resolution API',
-        'dispute':     'dispute management API',
-        'refund':      'refund processing API',
-        'compensation':'compensation calculation API',
-
-
-        'credit':      'credit assessment API',
-        'score':       'scoring engine API',
-        'scoring':     'credit scoring API',
-        'rating':      'credit rating API',
-        'loan':        'loan processing API',
-        'mortgage':    'mortgage evaluation API',
-        'bank':        'banking service API',
-        'finance':     'financial service API',
-        'risk':        'risk assessment API',
-        'fraud':       'fraud detection API',
-        'kyc':         'KYC verification API',
-        'aml':         'AML compliance API',
-        'income':      'income verification API',
-        'asset':       'asset valuation API',
-        'application': 'application processing API',
-        'approve':     'approval workflow API',
-        'reject':      'rejection notification API',
-
-
-        'restaurant':  'restaurant management API',
-        'food':        'food ordering API',
-        'meal':        'meal service API',
-        'dish':        'dish selection API',
-        'menu':        'menu catalog API',
-        'beverage':    'beverage ordering API',
-        'drink':       'drink selection API',
-        'dessert':     'dessert ordering API',
-        'tray':        'tray management service',
-        'cafeteria':   'cafeteria management API',
-        'station':     'service station API',
-        'buffet':      'buffet management API',
-        'cook':        'kitchen preparation API',
-        'prepare':     'preparation service API',
-        'serve':       'service delivery API',
-        'seat':        'seating management API',
-        'table':       'table reservation API',
-
-
-        'workflow':    'workflow engine API',
-        'approval':    'approval management API',
-        'review':      'review process API',
-        'audit':       'audit trail API',
-        'compliance':  'compliance check API',
-        'regulation':  'regulatory API',
-        'document':    'document management API',
-        'form':        'form processing API',
-        'report':      'reporting API',
-        'notification': 'notification service API',
-        'alert':       'alert management API',
-        'email':       'email service API',
-        'sms':         'SMS notification API',
-    }
-
-
-    ROLE_WORDS = [
-        'secretary',
-        'the secretary',
-        'manager',
-        'the manager',
-        'department head',
-        'logistics department head',
-        'logistics head',
-        'warehousemen',
-        'the warehousemen',
-        'warehouse staff',
-        'staff',
-        'worker',
-        'employee',
-        'clerk',
-        'agent',
-        'operator',
-        'head',
-        'officer',
-        'supervisor',
-        'coordinator',
-        'director',
-        'analyst',
+        "customer service representative", "service representative",
+        "representative",
     ]
 
 
-    PASSIVE_PATTERNS = [
-        (r'is\s+(\w+ed)\s+by',  r'\1'),
-        (r'are\s+(\w+ed)\s+by', r'\1'),
-        (r'was\s+(\w+ed)\s+by', r'\1'),
-        (r'were\s+(\w+ed)\s+by',r'\1'),
-        (r'is\s+(\w+ed)',        r'\1'),
-        (r'are\s+(\w+ed)',       r'\1'),
-        (r'was\s+(\w+ed)',       r'\1'),
-        (r'were\s+(\w+ed)',      r'\1'),
-    ]
+    _ROLE_FILLER_PATTERN = (
+        r"\bwho\s+(?:will|shall|should|does|do|is\s+going\s+to)"
+        r"(?:\s+(?:do|handle|be\s+responsible\s+for))?\b"
+    )
 
 
-    _DEFAULT_AUTO_KEYWORDS_CANDIDATES = [
+    _PASSIVE_RE = re.compile(
+        r"^(?P<obj>.+?)\s+(?:is|are|was|were)\s+(?:being\s+)?(?P<pp>[a-z]+)(?P<rest>(?:\s+.*)?)$"
+    )
+    _SUBORDINATORS = frozenset({
+        "if", "when", "once", "after", "before", "while", "unless",
+        "whether", "because", "since", "as", "until",
+    })
+    _DETERMINERS = frozenset({"the", "a", "an", "this", "that", "these", "those"})
+    _AGENT_STOP_WORDS = frozenset({
+        "for", "to", "in", "on", "at", "with", "from", "of", "and", "or",
+        "if", "when", "before", "after", "then", "using", "via", "into",
+    })
+
+
+    IRREGULAR_VERB_FORMS = {
+        "does": "do", "did": "do", "done": "do",
+        "takes": "take", "took": "take", "taken": "take",
+        "makes": "make", "made": "make",
+        "gets": "get", "got": "get", "gotten": "get",
+        "writes": "write", "wrote": "write", "written": "write",
+        "sends": "send", "sent": "send",
+        "chooses": "choose", "chose": "choose", "chosen": "choose",
+        "gives": "give", "gave": "give", "given": "give",
+        "shows": "show", "showed": "show", "shown": "show",
+        "holds": "hold", "held": "hold",
+        "pays": "pay", "paid": "pay",
+        "keeps": "keep", "kept": "keep",
+        "buys": "buy", "bought": "buy",
+        "finds": "find", "found": "find",
+        "tells": "tell", "told": "tell",
+        "builds": "build", "built": "build",
+    }
+
+
+    BUSINESS_VERBS = frozenset({
+        "clarify", "determine", "decide", "assess", "evaluate", "check",
+        "verify", "validate", "inspect", "review", "calculate", "compute",
+        "score", "approve", "reject", "confirm", "submit", "receive",
+        "register", "assign", "schedule", "allocate", "monitor", "track",
+        "update", "cancel", "terminate", "write", "create", "generate",
+        "prepare", "process", "handle", "perform", "execute", "request",
+        "notify", "send", "select", "obtain", "retrieve", "package", "ship",
+        "deliver", "arrange", "complete", "finalize", "print", "issue",
+        "record", "store", "pay", "charge", "book", "reserve", "deposit",
+        "transfer", "authorize", "publish", "collect", "sign", "archive",
+        "close", "open", "forward", "return", "refund", "claim", "file",
+        "escalate", "resolve", "assemble", "load", "unload", "pack", "label",
+        "inform", "offer", "quote", "invoice", "insure", "purchase", "order",
+        "provide", "display", "install", "deploy", "enroll", "search",
+    })
+
+
+    VERB_NORMALIZATION = {
+        "invite": "request", "ask": "request",
+        "take": "obtain", "acquire": "obtain", "procure": "obtain",
+        "collect": "obtain", "gather": "obtain",
+        "make": "create", "build": "create", "construct": "create",
+        "produce": "generate",
+        "pick": "select", "choose": "select",
+        "do": "perform", "conduct": "perform",
+        "fetch": "retrieve", "pull": "retrieve", "grab": "retrieve",
+        "find": "search",
+        "inform": "notify", "tell": "notify", "alert": "notify", "remind": "notify",
+        "modify": "update", "change": "update", "edit": "update",
+        "revise": "update", "amend": "update",
+        "remove": "delete", "erase": "delete", "discard": "delete",
+        "forward": "send", "transmit": "send",
+        "arrange": "schedule", "organize": "schedule",
+        "examine": "inspect",
+        "buy": "purchase",
+        "give": "provide",
+        "show": "display",
+    }
+
+
+    _DEFAULT_TABLE_CANDIDATES = [
         "domain_keywords_auto.json",
         "data/domain_keywords_auto.json",
     ]
+    MAX_INJECTED_PHRASES = 3
+    _PARTIAL_MATCH_MIN_RATIO = 0.5
 
-    def __init__(self, domain_keywords_path: Optional[str] = None,
-                 require_evidence_for_single_word: bool = False):
+    def __init__(
+        self,
+        domain_keywords_path: Optional[str] = None,
+        domain_table: Optional[Dict[str, Dict]] = None,
+        require_evidence_for_single_word: bool = False,
+        enabled_steps: Optional[Iterable[str]] = None,
+        verbose: bool = True,
+    ):
 
         self.require_evidence_for_single_word = require_evidence_for_single_word
-        (self.DOMAIN_KEYWORDS,
-         self._keyword_source,
-         self.CATEGORY_TOP_WORDS,
-         self.CATEGORY_IS_GENERIC) = self._load_domain_keywords(domain_keywords_path)
+        steps = tuple(enabled_steps) if enabled_steps is not None else self.STEPS
+        unknown = set(steps) - set(self.STEPS)
+        if unknown:
+            raise ValueError("Unknown enhancement steps: %s" % sorted(unknown))
+        self.enabled_steps = set(steps)
 
-        self._keyword_source_is_auto: bool = self._keyword_source.startswith("auto-mined")
+        (self.DOMAIN_KEYWORDS,
+         self.CATEGORY_TOP_WORDS,
+         self.CATEGORY_IS_GENERIC,
+         self._table_source) = self._load_domain_table(domain_keywords_path, domain_table)
+
+
+        roles = sorted({r.lower() for r in self.ROLE_LEXICON}, key=len, reverse=True)
+        self._role_re = re.compile(
+            r"\b(?:by\s+)?(?:(?:the|a|an)\s+)?(?:%s)s?\b" % "|".join(re.escape(r) for r in roles)
+        )
+        self._role_filler_re = re.compile(self._ROLE_FILLER_PATTERN)
+
+        self._known_verbs: Set[str] = (
+            set(self.BUSINESS_VERBS)
+            | set(self.VERB_NORMALIZATION)
+            | set(self.VERB_NORMALIZATION.values())
+        )
+
 
         self._category_stem_tokens: Dict[str, List[str]] = {
             cat: [self._stem(t) for t in re.split(r"[-_\s]+", cat) if t]
             for cat in self.DOMAIN_KEYWORDS
         }
 
-        self._category_topword_stems: Dict[str, set] = {
+
+        topword_stems: Dict[str, Set[str]] = {
             cat: {
                 self._stem(w) for w in self.CATEGORY_TOP_WORDS.get(cat, [])
                 if self._stem(w) not in set(self._category_stem_tokens.get(cat, []))
@@ -354,28 +169,246 @@ class TaskEnhancer:
 
 
         stem_category_df: Dict[str, int] = {}
-        for cat, words in self.CATEGORY_TOP_WORDS.items():
-            for w in {self._stem(x) for x in words}:
-                stem_category_df[w] = stem_category_df.get(w, 0) + 1
-
+        for words in self.CATEGORY_TOP_WORDS.values():
+            for stem in {self._stem(w) for w in words}:
+                stem_category_df[stem] = stem_category_df.get(stem, 0) + 1
         num_categories = max(1, len(self.CATEGORY_TOP_WORDS))
-
-        self._generic_word_df_threshold = max(20, math.ceil(0.07 * num_categories))
-        self._cross_category_generic_stems: set = {
-            stem for stem, df in stem_category_df.items()
-            if df >= self._generic_word_df_threshold
+        self._generic_df_threshold = max(20, math.ceil(0.07 * num_categories))
+        self._cross_category_generic_stems: Set[str] = {
+            s for s, df in stem_category_df.items() if df >= self._generic_df_threshold
         }
-
-
-        self._category_evidence_stems: Dict[str, set] = {
+        self._category_evidence_stems: Dict[str, Set[str]] = {
             cat: stems - self._cross_category_generic_stems
-            for cat, stems in self._category_topword_stems.items()
+            for cat, stems in topword_stems.items()
         }
 
-        print(f"[TaskEnhancer] 领域关键词表来源: {self._keyword_source}"
-              f"（共 {len(self.DOMAIN_KEYWORDS)} 个领域词条，"
-              f"跨类目通用词 {len(self._cross_category_generic_stems)} 个，"
-              f"阈值=出现在 >= {self._generic_word_df_threshold} 个类目的 top_words 中）")
+        if verbose:
+            print("[TaskEnhancer] domain table: %s (%d categories)"
+                  % (self._table_source, len(self.DOMAIN_KEYWORDS)))
+
+
+    def _load_domain_table(
+        self, path: Optional[str], table: Optional[Dict[str, Dict]]
+    ) -> Tuple[Dict[str, str], Dict[str, List[str]], Dict[str, bool], str]:
+
+        raw: Optional[Dict[str, Dict]] = None
+        source = "none"
+
+        if table is not None:
+            raw, source = table, "provided table"
+        else:
+            if path:
+                candidates = [Path(path)]
+            else:
+                here = Path(__file__).resolve().parent
+                candidates = [here / p for p in self._DEFAULT_TABLE_CANDIDATES]
+            for candidate in candidates:
+                if not candidate.is_file():
+                    continue
+                try:
+                    with open(candidate, "r", encoding="utf-8") as f:
+                        raw = json.load(f)
+                    source = str(candidate)
+                    break
+                except (OSError, json.JSONDecodeError) as exc:
+                    warnings.warn("Failed to load %s: %s" % (candidate, exc))
+
+        if not raw:
+            warnings.warn(
+                "No mined domain table found; keyword injection is disabled. "
+                "Run the offline mining script on the API repository to build it."
+            )
+            return {}, {}, {}, "none"
+
+        keywords = {cat: info["injection"] for cat, info in raw.items()}
+        top_words = {cat: list(info.get("top_words", [])) for cat, info in raw.items()}
+        is_generic = {cat: bool(info.get("is_generic", False)) for cat, info in raw.items()}
+        return keywords, top_words, is_generic, source
+
+
+
+    def enhance_description(self, description: str) -> str:
+
+        return self._run_cascade(description)[0]
+
+    def enhance(self, task: Dict) -> Dict:
+
+        original = task.get("description") or task.get("name", "")
+        enhanced, trace = self._run_cascade(original)
+
+        task["original_description"] = original
+        task["description"] = enhanced
+        task["enhanced"] = True
+        task["enhancement_trace"] = trace
+        return task
+
+    def enhance_batch(self, tasks: List[Dict]) -> List[Dict]:
+
+        return [self.enhance(task.copy()) for task in tasks]
+
+    def get_enhancement_summary(self, enhanced_tasks: List[Dict]) -> Dict:
+
+        total = len(enhanced_tasks)
+        traces = [t.get("enhancement_trace", {}) for t in enhanced_tasks]
+        changed = sum(
+            1 for t in enhanced_tasks
+            if t.get("description") != t.get("original_description")
+        )
+        return {
+            "total_tasks": total,
+            "enhanced_count": changed,
+            "role_removed_count": sum(1 for tr in traces if tr.get("role_removed")),
+            "passive_converted_count": sum(1 for tr in traces if tr.get("passive_converted")),
+            "verb_standardized_count": sum(1 for tr in traces if tr.get("verb_standardized")),
+            "keyword_injected_count": sum(1 for tr in traces if tr.get("injected_phrases")),
+            "enhancement_rate": changed / total if total else 0.0,
+        }
+
+
+
+    def _run_cascade(self, description: str) -> Tuple[str, Dict]:
+        text = " ".join((description or "").lower().split())
+        trace = {
+            "role_removed": False,
+            "passive_converted": False,
+            "verb_standardized": False,
+            "injected_phrases": [],
+        }
+
+        if "remove_role" in self.enabled_steps:
+            new = self._remove_role_words(text)
+            trace["role_removed"] = new != text
+            text = new
+
+        if "passive_to_active" in self.enabled_steps:
+            new = self._passive_to_active(text)
+            trace["passive_converted"] = new != text
+            text = new
+
+        if "verb_standardize" in self.enabled_steps:
+            new = self._standardize_verbs(text)
+            trace["verb_standardized"] = new != text
+            text = new
+
+        if "inject_keywords" in self.enabled_steps:
+            text, phrases = self._inject_api_keywords(text)
+            trace["injected_phrases"] = phrases
+
+        return text, trace
+
+
+
+    def _remove_role_words(self, text: str) -> str:
+        text = self._role_re.sub(" ", text)
+        text = self._role_filler_re.sub(" ", text)
+        return " ".join(text.split())
+
+
+
+    def _passive_to_active(self, text: str) -> str:
+        clauses = [c for c in re.split(r"(?<=[.;])\s+", text.strip()) if c]
+        return " ".join(self._convert_clause(c) for c in clauses)
+
+    def _convert_clause(self, clause: str) -> str:
+        trailing = ""
+        punct = re.search(r"[.;]+$", clause)
+        if punct:
+            trailing, clause = punct.group(0), clause[:punct.start()]
+
+        match = self._PASSIVE_RE.match(clause)
+        if not match:
+            return clause + trailing
+
+        obj_tokens = match.group("obj").split()
+
+        if (not obj_tokens
+                or any(t in self._SUBORDINATORS for t in obj_tokens)
+                or self._to_base_form(obj_tokens[0]) is not None):
+            return clause + trailing
+
+        base = self._participle_to_base(match.group("pp"))
+        if base is None:
+            return clause + trailing
+
+        while obj_tokens and obj_tokens[0] in self._DETERMINERS:
+            obj_tokens = obj_tokens[1:]
+        if not obj_tokens:
+            return clause + trailing
+
+        rest = self._drop_agent_phrase(match.group("rest").split())
+        converted = " ".join([base] + obj_tokens + rest)
+        return converted + trailing
+
+    def _drop_agent_phrase(self, tokens: List[str]) -> List[str]:
+
+        if not tokens or tokens[0] != "by":
+            return tokens
+        i = 1
+        if i < len(tokens) and tokens[i] in self._DETERMINERS:
+            i += 1
+        consumed = 0
+        while i < len(tokens) and consumed < 2 and tokens[i] not in self._AGENT_STOP_WORDS:
+            i += 1
+            consumed += 1
+        return tokens[i:]
+
+    def _participle_to_base(self, word: str) -> Optional[str]:
+
+        if word in self.IRREGULAR_VERB_FORMS:
+            return self.IRREGULAR_VERB_FORMS[word]
+        if not word.endswith("ed") or len(word) < 4:
+            return None
+        if word.endswith("ied"):
+            return word[:-3] + "y"
+        stem = word[:-2]
+        candidates = [stem + "e", stem]
+        if len(stem) >= 3 and stem[-1] == stem[-2]:
+            candidates.append(stem[:-1])
+        for cand in candidates:
+            if cand in self._known_verbs:
+                return cand
+        if stem and stem[-1] in "vcgzu":
+            return stem + "e"
+        if len(stem) >= 3 and stem[-1] == stem[-2] and stem[-1] in "bgmnprt":
+            return stem[:-1]
+        return stem
+
+
+
+    def _standardize_verbs(self, text: str) -> str:
+        words = text.split()
+        if not words:
+            return text
+        first = words[0].strip(".,;:!?")
+        base = self._to_base_form(first)
+        canonical = self.VERB_NORMALIZATION.get(base) if base else None
+        if canonical:
+            words[0] = canonical
+        return " ".join(words)
+
+    def _to_base_form(self, word: str) -> Optional[str]:
+
+        if word in self._known_verbs:
+            return word
+        if word in self.IRREGULAR_VERB_FORMS:
+            return self.IRREGULAR_VERB_FORMS[word]
+        candidates: List[str] = []
+        if word.endswith("ies"):
+            candidates.append(word[:-3] + "y")
+        if word.endswith("es"):
+            candidates.append(word[:-2])
+        if word.endswith("s"):
+            candidates.append(word[:-1])
+        if word.endswith("ing"):
+            candidates.extend([word[:-3], word[:-3] + "e"])
+        if word.endswith("ed"):
+            candidates.extend([word[:-2], word[:-1]])
+        for cand in candidates:
+            if cand in self._known_verbs:
+                return cand
+        return None
+
+
 
     @staticmethod
     def _stem(word: str) -> str:
@@ -389,89 +422,28 @@ class TaskEnhancer:
             return w[:-1]
         return w
 
-    def _load_domain_keywords(
-        self, domain_keywords_path: Optional[str]
-    ) -> Tuple[Dict[str, str], str, Dict[str, List[str]], Dict[str, bool]]:
-
-        candidate_paths: List[Path] = []
-        if domain_keywords_path:
-            candidate_paths.append(Path(domain_keywords_path))
-        else:
-            here = Path(__file__).resolve().parent
-            candidate_paths.extend(here / p for p in self._DEFAULT_AUTO_KEYWORDS_CANDIDATES)
-
-        for path in candidate_paths:
-            if path.is_file():
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        raw = json.load(f)
-                    # 自动挖掘脚本输出格式: {category: {"injection": ..., "top_words": [...], ...}}
-                    flat = {cat: info["injection"] for cat, info in raw.items()}
-                    top_words = {
-                        cat: list(info.get("top_words", []))
-                        for cat, info in raw.items()
-                    }
-                    is_generic = {
-                        cat: bool(info.get("is_generic", False))
-                        for cat, info in raw.items()
-                    }
-                    if flat:
-                        return flat, f"auto-mined ({path})", top_words, is_generic
-                except Exception as e:  # noqa: BLE001
-                    print(f"[TaskEnhancer] 警告：加载 {path} 失败（{e}），继续尝试其他来源")
-
-        print("[TaskEnhancer] 警告：未找到自动挖掘词表 domain_keywords_auto.json，"
-              "回退到 v1.1 手写词表 _FALLBACK_DOMAIN_KEYWORDS。"
-              "如需使用自动挖掘版，请先运行 mine_domain_keywords.py 生成该文件。")
-
-        fallback_top_words = {
-            cat: [w for w in re.findall(r"[a-zA-Z]+", phrase.lower())
-                  if w not in {"api", cat}]
-            for cat, phrase in self._FALLBACK_DOMAIN_KEYWORDS.items()
-        }
-        fallback_is_generic = {cat: False for cat in self._FALLBACK_DOMAIN_KEYWORDS}
-        return (dict(self._FALLBACK_DOMAIN_KEYWORDS), "fallback (hand-written v1.1)",
-                fallback_top_words, fallback_is_generic)
-
     def match_categories(self, text: str) -> List[str]:
 
         text_tokens = {self._stem(t) for t in re.findall(r"[a-zA-Z]+", text.lower())}
+        matched: List[Tuple[str, bool]] = []
 
-
-        _PARTIAL_MATCH_MIN_RATIO = 0.5
-
-        matched = []  # List[Tuple[cat, is_full_match]]
-        for cat, stem_subtokens in self._category_stem_tokens.items():
-            if not stem_subtokens:
+        for cat, subtokens in self._category_stem_tokens.items():
+            if not subtokens:
                 continue
+            hits = sum(1 for s in subtokens if s in text_tokens)
+            is_full = hits == len(subtokens)
+            evidence = self._category_evidence_stems.get(cat, set())
 
-            hit_count = sum(1 for st in stem_subtokens if st in text_tokens)
-            is_full = hit_count == len(stem_subtokens)
-
-            if len(stem_subtokens) == 1:
+            if len(subtokens) == 1:
                 if not is_full:
                     continue
-
-
-                if self._keyword_source_is_auto and self.require_evidence_for_single_word:
-
-                    evidence_stems = self._category_evidence_stems.get(cat, set())
-                    if not (evidence_stems & text_tokens):
-                        continue
-
+                if self.require_evidence_for_single_word and not (evidence & text_tokens):
+                    continue
                 matched.append((cat, True))
-                continue
-
-
-            if is_full:
+            elif is_full:
                 matched.append((cat, True))
-                continue
-
-
-            if hit_count / len(stem_subtokens) >= _PARTIAL_MATCH_MIN_RATIO:
-                evidence_stems = self._category_evidence_stems.get(cat, set())
-                if evidence_stems and (evidence_stems & text_tokens):
-                    matched.append((cat, False))
+            elif hits / len(subtokens) >= self._PARTIAL_MATCH_MIN_RATIO and (evidence & text_tokens):
+                matched.append((cat, False))
 
         matched.sort(
             key=lambda item: (
@@ -484,238 +456,53 @@ class TaskEnhancer:
         )
         return [cat for cat, _ in matched]
 
+    def _inject_api_keywords(self, text: str) -> Tuple[str, List[str]]:
 
-    def enhance(self, task: Dict) -> Dict:
+        if not self.DOMAIN_KEYWORDS:
+            return text, []
 
-        name = task.get('name', '')
-        desc = task.get('description', '')
-
-        task['original_name']        = name
-        task['original_description'] = desc
-
-        name = self._remove_role_words(name)
-        desc = self._remove_role_words(desc)
-
-        name = self._passive_to_active(name)
-        desc = self._passive_to_active(desc)
-
-        name = self._standardize_verbs(name)
-
-        name = self._clean_redundancy(name)
-        desc = self._clean_redundancy(desc)
-
-
-        desc = self._inject_api_keywords(name, desc)
-
-        name = self._clean_format(name)
-        desc = self._clean_format(desc)
-
-        if name:
-            name = name[0].upper() + name[1:] if len(name) > 1 else name.upper()
-
-        task['name']        = name
-        task['description'] = desc
-        task['enhanced']    = True
-
-        return task
-
-    def _remove_role_words(self, text: str) -> str:
-
-        text_lower = text.lower()
-        for role in self.ROLE_WORDS:
-            text_lower = text_lower.replace(f' by {role}', '')
-            text_lower = text_lower.replace(f' by the {role}', '')
-            text_lower = text_lower.replace(f'{role} ', '')
-            text_lower = text_lower.replace(f'the {role} ', '')
-            text_lower = text_lower.replace(f' {role} ', ' ')
-        return text_lower
-
-    def _passive_to_active(self, text: str) -> str:
-
-        text = re.sub(r'\b(is|are|was|were)\s+(\w+ed)\s+by\b', r'\2', text, flags=re.IGNORECASE)
-        text = re.sub(r'\b(is|are|was|were)\s+(\w+en)\s+by\b', r'\2', text, flags=re.IGNORECASE)
-        text = re.sub(r'\b(is|are|was|were)\s+(\w+ed)\b',      r'\2', text, flags=re.IGNORECASE)
-        text = re.sub(r'\b(is|are|was|were)\s+(\w+en)\b',      r'\2', text, flags=re.IGNORECASE)
-        return text
-
-    def _standardize_verbs(self, text: str) -> str:
-
-        words = text.split()
-        for i, word in enumerate(words):
-            word_clean = word.strip('.,;:!?').lower()
-            if word_clean in self.VERB_MAPPING:
-                words[i] = self.VERB_MAPPING[word_clean]
+        selected: List[str] = []
+        seen_heads: Set[str] = set()
+        for cat in self.match_categories(text):
+            phrase = self.DOMAIN_KEYWORDS[cat]
+            head = phrase.split()[0].lower() if phrase.split() else ""
+            if head in seen_heads:
+                continue
+            seen_heads.add(head)
+            selected.append(phrase)
+            if len(selected) >= self.MAX_INJECTED_PHRASES:
                 break
-        return ' '.join(words)
 
-    def _clean_redundancy(self, text: str) -> str:
+        if not selected:
+            return text, []
+        return text.rstrip(". ") + " (" + " | ".join(selected) + ").", selected
 
-        redundancy_patterns = [
-            r'\b(who will do|who does|who should)\b',
-            r'\b(it is necessary to|necessary to)\b',
-            r'\bin order to\b',
-            r'\bshall be\b',
-            r'\bwill be\b',
-            r'\bcan be\b',
-            r'\bmust be\b',
-            r'\bshould be\b',
-            r'\bneeds to be\b',
-            r'\bhas to be\b',
-        ]
-        for pattern in redundancy_patterns:
-            text = re.sub(pattern, '', text, flags=re.IGNORECASE)
-        return text
-
-
-    def _inject_api_keywords(self, name: str, desc: str) -> str:
-
-        combined_text = f"{name} {desc}"
-        matched_categories = self.match_categories(combined_text)
-
-        if not matched_categories:
-            return desc
-
-
-        seen_terms: set = set()
-        selected_terms: List[str] = []
-        for cat in matched_categories:
-            api_term = self.DOMAIN_KEYWORDS[cat]
-
-            base = api_term.split()[0].lower()
-            if base not in seen_terms and len(selected_terms) < 3:
-                seen_terms.add(base)
-                selected_terms.append(api_term)
-
-        if not selected_terms:
-            return desc
-
-
-        combined = " | ".join(selected_terms)
-        desc = desc.rstrip('.').rstrip() + f' ({combined}).'
-        return desc
-
-    def _combine_api_terms(self, terms: List[str]) -> str:
-
-        if not terms:
-            return ""
-        if len(terms) == 1:
-            return f"({terms[0]})"
-        return "(" + " | ".join(terms) + ")"
-
-    def _clean_format(self, text: str) -> str:
-
-        text = ' '.join(text.split())
-        text = re.sub(r'^(the|a|an)\s+',     '', text, flags=re.IGNORECASE)
-        text = re.sub(r'^(and|or|but|so|then)\s+', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\b(the|a|an)\s+(the|a|an)\b', r'\1', text, flags=re.IGNORECASE)
-        return text.strip()
-
-    def enhance_batch(self, tasks: List[Dict]) -> List[Dict]:
-
-        enhanced_tasks = []
-        for task in tasks:
-            task_copy     = task.copy()
-            enhanced_task = self.enhance(task_copy)
-            enhanced_tasks.append(enhanced_task)
-        return enhanced_tasks
-
-    def get_enhancement_summary(self, original_tasks: List[Dict], enhanced_tasks: List[Dict]) -> Dict:
-
-        total = len(original_tasks)
-        enhanced_count       = 0
-        role_removed_count   = 0
-        verb_changed_count   = 0
-        keyword_injected_count = 0
-
-        for orig, enhanced in zip(original_tasks, enhanced_tasks):
-            orig_name     = orig.get('name', '')
-            enhanced_name = enhanced.get('name', '')
-            orig_desc     = orig.get('description', '')
-            enhanced_desc = enhanced.get('description', '')
-
-            if orig_name != enhanced_name or orig_desc != enhanced_desc:
-                enhanced_count += 1
-
-            if any(role in orig_name.lower() or role in orig_desc.lower()
-                   for role in self.ROLE_WORDS):
-                role_removed_count += 1
-
-            orig_first     = orig_name.split()[0].lower()     if orig_name.split()     else ''
-            enhanced_first = enhanced_name.split()[0].lower() if enhanced_name.split() else ''
-            if orig_first != enhanced_first:
-                verb_changed_count += 1
-
-            if '(' in enhanced_desc and ')' in enhanced_desc:
-                keyword_injected_count += 1
-
-        return {
-            'total_tasks':           total,
-            'enhanced_count':        enhanced_count,
-            'role_removed_count':    role_removed_count,
-            'verb_changed_count':    verb_changed_count,
-            'keyword_injected_count': keyword_injected_count,
-            'enhancement_rate':      enhanced_count / total if total > 0 else 0
-        }
 
 
 
 if __name__ == "__main__":
-    test_tasks = [
-        {
-            'task_id': 'task_1',
-            'name': 'the secretary clarifies who will do the shipping',
-            'description': 'The secretary determines which carrier should handle the shipment'
-        },
-        {
-            'task_id': 'task_2',
-            'name': 'a package label is written by the secretary',
-            'description': 'Create and print the shipping label for the parcel'
-        },
-        {
-            'task_id': 'task_3',
-            'name': 'the warehousemen package goods',
-            'description': 'Goods are packaged by warehouse staff for delivery'
-        },
-        {
-            'task_id': 'task_4',
-            'name': 'parcel insurance taken by logistics department head',
-            'description': 'Purchase insurance coverage if necessary'
-        },
-        {
-            'task_id': 'task_5',
-            'name': 'calculate credit score for loan application',
-            'description': 'Run credit scoring model on applicant data'
-        },
-        {
-            'task_id': 'task_6',
-            'name': 'customer selects food from restaurant menu',
-            'description': 'Customer browses the menu and selects a dish'
-        },
+    demo_tasks = [
+        {"task_id": "task_1", "name": "Clarify shipping",
+         "description": "The secretary clarifies who will do the shipping"},
+        {"task_id": "task_2", "name": "Write package label",
+         "description": "A package label is written by the secretary"},
+        {"task_id": "task_3", "name": "Package goods",
+         "description": "Goods are packaged by warehouse staff"},
+        {"task_id": "task_4", "name": "Take insurance",
+         "description": "The logistics department head takes insurance for the parcel"},
+        {"task_id": "task_5", "name": "Invite bids",
+         "description": "The manager invites bids from carriers"},
     ]
 
     enhancer = TaskEnhancer()
+    enhanced = enhancer.enhance_batch(demo_tasks)
 
-    print("=" * 80)
-    print("TaskEnhancer v1.6 测试")
-    print("=" * 80)
+    for task in enhanced:
+        print("\n[%s]" % task["task_id"])
+        print("  original: %s" % task["original_description"])
+        print("  enhanced: %s" % task["description"])
 
-    for task in test_tasks:
-        print(f"\n[{task['task_id']}]")
-        print(f"  原始名称: {task['name']}")
-        enhanced = enhancer.enhance(task.copy())
-        print(f"  增强名称: {enhanced['name']}")
-        print(f"  原始描述: {task['description']}")
-        print(f"  增强描述: {enhanced['description']}")
-
-    enhanced_batch = enhancer.enhance_batch(test_tasks)
-    summary = enhancer.get_enhancement_summary(test_tasks, enhanced_batch)
-
-    print("\n" + "=" * 80)
-    print("增强效果摘要")
-    print("=" * 80)
-    print(f"  总任务数:     {summary['total_tasks']}")
-    print(f"  增强任务数:   {summary['enhanced_count']}")
-    print(f"  移除角色词:   {summary['role_removed_count']}")
-    print(f"  动词标准化:   {summary['verb_changed_count']}")
-    print(f"  关键词注入:   {summary['keyword_injected_count']}")
-    print(f"  增强率:       {summary['enhancement_rate']:.1%}")
+    summary = enhancer.get_enhancement_summary(enhanced)
+    print("\nSummary:")
+    for key, value in summary.items():
+        print("  %s: %s" % (key, value))
